@@ -41,18 +41,30 @@ Có. Mặc định (chế độ kiểm tra, dry-run) script **chỉ đọc**.
 - Script **không** thay đổi, cài đặt hay xoá gì. Nó không hỏi mật khẩu và không cần `sudo`.
 - Script **không** cần git, Xcode, Homebrew hay Python. Nó chỉ dùng các công cụ có sẵn trong macOS và bỏ qua những gì máy bạn không có.
 - Script **không** gửi dữ liệu của bạn đi đâu. Lưu lượng mạng duy nhất là các kết nối TLS tới 12 server thử nghiệm của advisory và tới `github.com` / `pypi.org` để xác nhận các site bình thường vẫn hoạt động.
-- File duy nhất nó ghi ra là file log trên Desktop.
+- Script chỉ ghi ra file log trên Desktop và một thư mục tạm chứa các chương trình kiểm tra nhỏ. Thư mục tạm được xoá khi script chạy xong.
 - Một ngoại lệ, chỉ khi Docker đang chạy: để đọc file CA bên trong mỗi image trên máy, script tạo một container ở trạng thái dừng từ image đó (không bao giờ khởi động nó) rồi xoá ngay. Dùng `--no-docker` để bỏ qua bước này.
 
 Ở chế độ kiểm tra, các bản sửa chỉ được **gợi ý**. Chúng chỉ được áp dụng khi bạn chạy với `--fix` **và** trả lời `y`. Xem [Chế độ tự sửa](#chế-độ-tự-sửa---fix).
 
-Nếu muốn đọc script trước khi chạy:
+### Đọc trước khi chạy
+
+Tải về, đọc, rồi mới chạy:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/wakumo/emudhra-check/main/emudhra-check.sh -o emudhra-check.sh
-less emudhra-check.sh        # đọc
-bash emudhra-check.sh        # chạy
+less emudhra-check.sh            # đọc
+bash emudhra-check.sh            # chạy
 ```
+
+Script là một file duy nhất, chia thành các phần, mỗi phần bắt đầu bằng một dòng `# ====`. Danh sách các phần nằm ở đầu file. Nên xem ở đâu:
+
+| Phần | Nội dung |
+|---|---|
+| Phần đầu file | Script đọc gì, kết nối tới đâu, thay đổi gì, và danh sách các phần |
+| "Advisory data" | Dữ liệu từ advisory: server thử nghiệm, dấu hiệu nhận biết các root, 16 fingerprint, các phiên bản đã vá |
+| "Step 1" … "Step 13" | Mỗi bước kiểm tra là một hàm |
+| "Automatic fixes" | **Mọi thay đổi mà `--fix` có thể làm**, mỗi thay đổi là một hàm `fix_*`, kèm cách hoàn tác |
+| "Probe programs" | 4 chương trình nhỏ (Python, Node.js, Java, JavaScript của macOS) mở các kết nối thử nghiệm |
 
 ---
 
@@ -83,7 +95,7 @@ Với những thứ không thể kiểm tra trực tiếp, script đọc phiên 
 | Bước | Gì | Kiểm tra thế nào | Nếu FAIL |
 |---|---|---|---|
 | 1 | **Kết nối** | Máy có tới được 12 server thử nghiệm không? Có cấu hình proxy không? | Chỉ là cảnh báo. Trên mạng bị chặn, kết quả kiểm tra trực tiếp có thể không kết luận được. |
-| 2 | **macOS** | Bản cập nhật macOS đang chờ (`softwareupdate -l`). Kiểm tra trực tiếp trust store của chính macOS (Safari và app native dùng nó; curl/git/python3 của Apple, git của Homebrew và pip 24.2+ cũng dựa vào nó). Thiết lập tin cậy tuỳ chỉnh trong Keychain cho chứng chỉ eMudhra/emSign/AAA. `/etc/ssl/cert.pem` còn chứa các root bị ảnh hưởng không: curl, git, python3, perl và ruby có sẵn của Apple dùng file này, và cập nhật macOS không sửa nó. Phiên bản trình duyệt chỉ để tham khảo. | Cài bản cập nhật và khởi động lại: chỉ bản cập nhật macOS mới sửa được trust store của macOS, nên công cụ nào chỉ còn tin các chain mà chính macOS tin sẽ được báo đúng như vậy. Chạy bản sửa `/etc/ssl/cert.pem` của advisory (được in đầy đủ). Gỡ thiết lập tin cậy trong Keychain. |
+| 2 | **macOS** | Bản cập nhật macOS đang chờ (`softwareupdate -l`). Kiểm tra trực tiếp trust store của chính macOS (Safari và app native dùng nó; curl/git/python3 của Apple, git của Homebrew và pip 24.2+ cũng dựa vào nó). Thiết lập tin cậy tuỳ chỉnh trong Keychain cho chứng chỉ eMudhra/emSign/AAA. `/etc/ssl/cert.pem` còn chứa các root bị ảnh hưởng không: curl, git, python3, perl và ruby có sẵn của Apple dùng file này, và cập nhật macOS không sửa nó. Phiên bản trình duyệt chỉ để tham khảo. | Cài bản cập nhật và khởi động lại. Nếu chính macOS vẫn tin các chain (Apple chưa chặn intermediate G3B kể cả trên macOS 27.0.1), `--fix` đánh dấu chúng là Never Trust trong login keychain; công cụ nào chỉ FAIL vì macOS sẽ được chỉ về bản sửa đó. Chạy bản sửa `/etc/ssl/cert.pem` của advisory (được in đầy đủ). Gỡ thiết lập tin cậy trong Keychain. |
 | 3 | **curl** | Mọi curl trên máy (`/usr/bin/curl` của Apple, curl của Homebrew, các bản khác trong PATH) kết nối tới 12 server thử nghiệm. | Bản sửa `/etc/ssl/cert.pem`, hoặc `brew upgrade ca-certificates curl` |
 | 4 | **git** | `git ls-remote` qua HTTPS tới 12 server thử nghiệm, với từng git. Bỏ qua nếu không cài git. | Giống curl. Kiểm tra `http.sslCAInfo`. |
 | 5 | **Python** | Với mỗi Python 3 (Apple, Homebrew, python.org, pyenv, uv, conda, mise, asdf): (a) context `ssl` mặc định, dùng bởi `urllib`; (b) **certifi**, dùng bởi `requests`/`httpx`, kiểm tra trực tiếp và kiểm tra file; (c) **pip**, thử `pip download` thật. | Nâng `certifi` lên 2026.10.19 trở lên và `pip` lên 26.2.2 trở lên. Với pip của Apple, bản sửa `PIP_CERT` của advisory được in ra. |
@@ -147,6 +159,7 @@ curl -fsSL https://raw.githubusercontent.com/wakumo/emudhra-check/main/emudhra-c
 | Vấn đề | Cách tự sửa | Cần mật khẩu |
 |---|---|---|
 | `/etc/ssl/cert.pem` còn các root bị ảnh hưởng (curl/git/python3 của Apple) | Cách xử lý tạm của advisory: gỡ 2 root. Bản gốc được giữ ở `/etc/ssl/cert.pem.pre-emudhra`. | có |
+| Trust store của macOS vẫn tin các chain thử nghiệm (Safari, curl/git/python3 của Apple, git của Homebrew, pip 24.2+) | Tải các intermediate mà server thử nghiệm gửi về và đánh dấu **Never Trust** trong login keychain những cert có SHA-256 nằm trong danh sách của advisory. Hoàn tác: xoá các chứng chỉ `EM … CA - G3x` trong Keychain Access > login. | mật khẩu đăng nhập (hộp thoại macOS) |
 | pip có sẵn của Apple tin các server thử nghiệm | Đặt `PIP_CERT=/etc/ssl/cert.pem` trong `usercustomize.py` của user (tác dụng như `sitecustomize.py` của advisory, nhưng macOS không chặn) | không |
 | Homebrew ca-certificates / curl / git / node / python / uv / mise đã cũ | `brew update`, rồi `brew upgrade` từng formula, chạy dưới quyền bạn. Formula nào lỗi, hoặc bị Homebrew ngừng hỗ trợ (ví dụ `python@3.8`), không làm dừng các formula khác. | không |
 | certifi hoặc pip cũ trong virtualenv, pyenv, conda hoặc Python của python.org | `python -m pip install --upgrade 'certifi>=2026.10.19'` / `'pip>=26.2.2'`. Với virtualenv tạo bằng uv (không có pip): `uv pip install`. Với certifi cài bằng pip vào Python của Homebrew: thêm `--break-system-packages`. | không |
@@ -220,6 +233,12 @@ Không. Bước 12 chỉ kiểm tra Docker image trên máy Mac này, và bướ
 
 ---
 
+## Phát triển
+
+Sửa trực tiếp file `emudhra-check.sh`. Trước khi push, kiểm tra `shellcheck emudhra-check.sh` không báo gì và script chạy được với bash 3.2 có sẵn trong macOS (`/bin/bash emudhra-check.sh`). Hãy giữ code tương thích với bash 3.2: không dùng mảng kết hợp (associative array), không dùng `mapfile`, không dùng `${var,,}`.
+
+---
+
 ## Nguồn dữ liệu
 
 Các server thử nghiệm, dấu hiệu nhận biết root certificate, 16 fingerprint chứng chỉ bị lộ và các phiên bản đã vá lấy từ advisory và repo nguồn của nó:
@@ -227,4 +246,4 @@ Các server thử nghiệm, dấu hiệu nhận biết root certificate, 16 fing
 - https://emudhra.we-have-a-problem.com/
 - https://github.com/galadran/we-have-a-problem.com (`chains/`, `roots.json`, `impacted-intermediates.json`)
 
-Nếu bảng "Who has patched?" của advisory thay đổi, cập nhật các giá trị `FIX_*` gần đầu file `emudhra-check.sh`.
+Nếu bảng "Who has patched?" của advisory thay đổi, cập nhật các giá trị `FIX_*` trong phần "Advisory data" của `emudhra-check.sh`.

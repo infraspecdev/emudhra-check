@@ -43,18 +43,30 @@
 - 何かを変更、インストール、削除することは**ありません**。パスワードを聞いたり `sudo` を使ったりもしません。
 - git、Xcode、Homebrew、Python は**不要**です。macOS に標準で入っているツールだけを使い、インストールされていないものはスキップします。
 - データをどこかに送信することは**ありません**。ネットワーク通信は、アドバイザリーの 12 台のテストサーバーへの TLS 接続と、通常のサイトに問題なくつながることを確認するための `github.com` / `pypi.org` への接続だけです。
-- 書き込むファイルは、デスクトップのログだけです。
+- 書き込むファイルは、デスクトップのログと、小さなテストプログラムを置く一時フォルダーだけです。一時フォルダーは終了時に削除されます。
 - 例外が 1 つあります。Docker が起動している場合に限り、各ローカルイメージ内の CA ファイルを読むために、イメージから停止状態のコンテナを作成し (起動はしません)、すぐに削除します。これを行わないようにするには `--no-docker` を付けます。
 
 チェックモードでは、修正は**提案されるだけ**です。修正が適用されるのは、`--fix` を付けて実行し、**さらに** `y` と答えたときだけです。詳しくは[自動修正モード](#自動修正モード---fix)を参照してください。
 
-実行する前にスクリプトの中身を読みたい場合は、次のようにします。
+### 実行する前に読んで確認する
+
+ダウンロードし、中身を読んでから実行します。
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/wakumo/emudhra-check/main/emudhra-check.sh -o emudhra-check.sh
-less emudhra-check.sh        # 読む
-bash emudhra-check.sh        # 実行する
+less emudhra-check.sh            # 読む
+bash emudhra-check.sh            # 実行する
 ```
+
+スクリプトは 1 つのファイルで、`# ====` の行で始まるセクションに分かれています。セクションの一覧はファイルの先頭にあります。見る場所は次のとおりです。
+
+| セクション | 内容 |
+|---|---|
+| ファイルの先頭 | スクリプトが何を読み、どこに接続し、何を変更するか、およびセクションの一覧 |
+| 「Advisory data」 | アドバイザリーのデータ: テストサーバー、ルート証明書の目印、16 個のフィンガープリント、修正済みバージョン |
+| 「Step 1」〜「Step 13」 | チェックの各ステップ (1 ステップ 1 関数) |
+| 「Automatic fixes」 | **`--fix` が行う可能性のあるすべての変更**。変更ごとに `fix_*` 関数が 1 つあり、元に戻す方法も書いてあります |
+| 「Probe programs」 | テスト接続を行う 4 つの小さなプログラム (Python、Node.js、Java、macOS の JavaScript) |
 
 ---
 
@@ -85,7 +97,7 @@ ev-g3c-emudhra.we-have-a-problem.com      ev-g3c-aaa-emudhra.we-have-a-problem.c
 | ステップ | 対象 | チェック方法 | FAIL の場合 |
 |---|---|---|---|
 | 1 | **接続** | この Mac から 12 台のテストサーバーにつながるか。プロキシが設定されているか。 | 警告のみです。通信が遮断されたネットワークでは、接続テストの結果が判定できないことがあります。 |
-| 2 | **macOS** | 保留中の macOS アップデート (`softwareupdate -l`)。macOS 自身のトラストストアの接続テスト (Safari やネイティブアプリが使用。Apple の curl / git / python3、Homebrew の git、pip 24.2 以降もこれにフォールバックします)。キーチェーンで eMudhra / emSign / AAA の証明書に独自の信頼設定がないか。`/etc/ssl/cert.pem` に影響を受けるルートがまだ含まれていないか (Apple 標準の curl、git、python3、perl、ruby はこのファイルを使いますが、macOS のアップデートでは修正されません)。ブラウザのバージョンは参考として表示します。 | アップデートをインストールして再起動します。macOS のトラストストアは macOS のアップデートでしか直らないため、macOS 自身が信頼しているチェーンだけを信頼しているツールにはそのことだけを表示します。アドバイザリーの `/etc/ssl/cert.pem` の修正を実行します (コマンド全体が表示されます)。キーチェーンの信頼設定を元に戻します。 |
+| 2 | **macOS** | 保留中の macOS アップデート (`softwareupdate -l`)。macOS 自身のトラストストアの接続テスト (Safari やネイティブアプリが使用。Apple の curl / git / python3、Homebrew の git、pip 24.2 以降もこれにフォールバックします)。キーチェーンで eMudhra / emSign / AAA の証明書に独自の信頼設定がないか。`/etc/ssl/cert.pem` に影響を受けるルートがまだ含まれていないか (Apple 標準の curl、git、python3、perl、ruby はこのファイルを使いますが、macOS のアップデートでは修正されません)。ブラウザのバージョンは参考として表示します。 | アップデートをインストールして再起動します。macOS 自身がまだチェーンを信頼している場合 (macOS 27.0.1 でも Apple は G3B 中間証明書をブロックしていませんでした)、`--fix` がログインキーチェーンでそれらを「常に信頼しない」に設定します。macOS が原因で失敗しているだけのツールには、この修正を案内します。アドバイザリーの `/etc/ssl/cert.pem` の修正を実行します (コマンド全体が表示されます)。キーチェーンの信頼設定を元に戻します。 |
 | 3 | **curl** | Mac 上のすべての curl (Apple の `/usr/bin/curl`、Homebrew の curl、PATH 上のその他) が 12 台のテストサーバーに接続します。 | `/etc/ssl/cert.pem` の修正、または `brew upgrade ca-certificates curl` |
 | 4 | **git** | git ごとに、12 台のテストサーバーに対して HTTPS で `git ls-remote` を実行します。git がなければスキップします。 | curl と同じです。`http.sslCAInfo` も確認してください。 |
 | 5 | **Python** | Python 3 ごと (Apple、Homebrew、python.org、pyenv、uv、conda、mise、asdf) に、(a) `urllib` が使う既定の `ssl` コンテキスト、(b) `requests` / `httpx` が使う **certifi** (接続テストとファイルのチェック)、(c) **pip** (実際に `pip download` を試行) を調べます。 | `certifi` を 2026.10.19 以降に、`pip` を 26.2.2 以降にアップグレードします。Apple の pip には、アドバイザリーの `PIP_CERT` の修正が表示されます。 |
@@ -149,6 +161,7 @@ curl -fsSL https://raw.githubusercontent.com/wakumo/emudhra-check/main/emudhra-c
 | 見つかった問題 | 自動修正の内容 | パスワード |
 |---|---|---|
 | `/etc/ssl/cert.pem` に影響を受けるルートが残っている (Apple の curl / git / python3) | アドバイザリーの回避策: 2 つのルートを削除します。元のファイルは `/etc/ssl/cert.pem.pre-emudhra` として残します。 | 必要 |
+| macOS のトラストストアがテストチェーンをまだ信頼している (Safari、Apple の curl / git / python3、Homebrew の git、pip 24.2 以降) | テストサーバーが送る中間証明書をダウンロードし、SHA-256 がアドバイザリーの一覧にあるものだけをログインキーチェーンで **常に信頼しない** に設定します。元に戻すには: キーチェーンアクセス > ログイン で `EM … CA - G3x` の証明書を削除します。 | ログインパスワード (macOS のダイアログ) |
 | Apple 標準の pip がテストサーバーを信頼している | ユーザー自身の `usercustomize.py` に `PIP_CERT=/etc/ssl/cert.pem` を設定します (アドバイザリーの `sitecustomize.py` と同じ効果で、macOS にブロックされません) | 不要 |
 | Homebrew の ca-certificates / curl / git / node / python / uv / mise が古い | `brew update` の後、formula ごとに `brew upgrade` を実行します (ご自身のユーザーで実行)。失敗した formula や、Homebrew で無効化された formula (`python@3.8` など) があっても、他の formula は続行します。 | 不要 |
 | virtualenv、pyenv、conda、python.org の Python の certifi または pip が古い | `python -m pip install --upgrade 'certifi>=2026.10.19'` / `'pip>=26.2.2'`。pip のない uv の virtualenv では `uv pip install`。Homebrew の Python に pip で入れた certifi は `--break-system-packages` を付けて同様に実行します。 | 不要 |
@@ -222,6 +235,12 @@ HTTPS の通信を検査するツールは証明書を再署名するため、�
 
 ---
 
+## 開発
+
+`emudhra-check.sh` を直接編集してください。push する前に、`shellcheck emudhra-check.sh` が何も報告しないこと、macOS 標準の bash 3.2 で動くこと (`/bin/bash emudhra-check.sh`) を確認してください。コードは bash 3.2 との互換性を保ってください (連想配列、`mapfile`、`${var,,}` は使わない)。
+
+---
+
 ## データの出典
 
 テストサーバー、ルート証明書の識別情報、漏えいした 16 個の証明書のフィンガープリント、修正済みバージョンは、アドバイザリーとそのソースリポジトリから取得しています。
@@ -229,4 +248,4 @@ HTTPS の通信を検査するツールは証明書を再署名するため、�
 - https://emudhra.we-have-a-problem.com/
 - https://github.com/galadran/we-have-a-problem.com (`chains/`、`roots.json`、`impacted-intermediates.json`)
 
-アドバイザリーの「Who has patched?」の表が変わった場合は、`emudhra-check.sh` の先頭付近にある `FIX_*` の値を更新してください。
+アドバイザリーの「Who has patched?」の表が変わった場合は、`emudhra-check.sh` の「Advisory data」セクションにある `FIX_*` の値を更新してください。

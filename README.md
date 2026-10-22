@@ -41,18 +41,30 @@ Yes. By default (check mode, a dry-run) the script is **read-only**.
 - It does **not** change, install or delete anything. It does not ask for your password or need `sudo`.
 - It does **not** need git, Xcode, Homebrew or Python. It only uses tools that ship with macOS, and it skips anything you do not have.
 - It does **not** send your data anywhere. The only network traffic is TLS connections to the advisory's 12 test servers and to `github.com` / `pypi.org`, which are used to confirm that normal sites still work.
-- The only file it writes is the log on your Desktop.
+- The only files it writes are the log on your Desktop and a temporary folder with its small test programs, which is deleted when it ends.
 - One exception, only if Docker is running: to read the CA file inside each local image, it creates a stopped container from the image (it never starts it) and removes it right away. Use `--no-docker` to skip this.
 
 In check mode, fixes are only **suggested**. They are applied only when you run with `--fix` **and** answer `y`. See [Auto-fix mode](#auto-fix-mode---fix).
 
-If you prefer to read the script before running it:
+### Read it before running
+
+Download it, read it, then run it:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/wakumo/emudhra-check/main/emudhra-check.sh -o emudhra-check.sh
-less emudhra-check.sh        # read it
-bash emudhra-check.sh        # run it
+less emudhra-check.sh            # read it
+bash emudhra-check.sh            # run it
 ```
+
+The script is one file, split into sections that each start with a `# ====` banner. The list of sections is at the top of the file. Where to look:
+
+| Section | What is in it |
+|---|---|
+| The header at the top | What the script reads, connects to and changes, and the list of sections |
+| "Advisory data" | The data from the advisory: test servers, root markers, the 16 fingerprints, patched versions |
+| "Step 1" … "Step 13" | One function per step of the check |
+| "Automatic fixes" | **Every change `--fix` can make**, one `fix_*` function each, with how to undo it |
+| "Probe programs" | The 4 small programs (Python, Node.js, Java, macOS JavaScript) that open the test connections |
 
 ---
 
@@ -83,7 +95,7 @@ For things that cannot be tested live, the script reads the version or the certi
 | Step | What | How it is checked | If it FAILs |
 |---|---|---|---|
 | 1 | **Connectivity** | Can this Mac reach the 12 test servers? Is a proxy configured? | Only a warning. Live results may be inconclusive on a blocked network. |
-| 2 | **macOS** | Pending macOS updates (`softwareupdate -l`). A live test of the macOS trust store itself (what Safari and native apps use; Apple's curl/git/python3, Homebrew git and pip 24.2+ also fall back to it). Custom Keychain trust for eMudhra/emSign/AAA certificates. Whether `/etc/ssl/cert.pem` still contains the affected roots: Apple's built-in curl, git, python3, perl and ruby use that file, and macOS updates do not fix it. Browser versions are shown for reference. | Install updates and restart: only a macOS update fixes the macOS trust store, so tools that only fail on chains macOS itself trusts are told just that. Run the advisory's `/etc/ssl/cert.pem` fix, which is printed in full. Reset the Keychain trust. |
+| 2 | **macOS** | Pending macOS updates (`softwareupdate -l`). A live test of the macOS trust store itself (what Safari and native apps use; Apple's curl/git/python3, Homebrew git and pip 24.2+ also fall back to it). Custom Keychain trust for eMudhra/emSign/AAA certificates. Whether `/etc/ssl/cert.pem` still contains the affected roots: Apple's built-in curl, git, python3, perl and ruby use that file, and macOS updates do not fix it. Browser versions are shown for reference. | Install updates and restart. If macOS itself still trusts the chains (Apple had not blocked the G3B intermediates even in macOS 27.0.1), `--fix` marks them Never Trust in your login keychain; tools that only fail because of macOS are pointed to that fix. Run the advisory's `/etc/ssl/cert.pem` fix, which is printed in full. Reset the Keychain trust. |
 | 3 | **curl** | Every curl on the Mac (Apple's `/usr/bin/curl`, Homebrew curl, others in your PATH) connects to the 12 test servers. | `/etc/ssl/cert.pem` fix, or `brew upgrade ca-certificates curl` |
 | 4 | **git** | `git ls-remote` over HTTPS against the 12 test servers, for each git. Skipped if git is not installed. | Same as curl. Check `http.sslCAInfo`. |
 | 5 | **Python** | For each Python 3 (Apple, Homebrew, python.org, pyenv, uv, conda, mise, asdf): (a) the default `ssl` context, used by `urllib`; (b) **certifi**, used by `requests`/`httpx`, live test plus a check of its file; (c) **pip**, a real `pip download` attempt. | Upgrade `certifi` to 2026.10.19 or later and `pip` to 26.2.2 or later. For Apple's pip, the advisory's `PIP_CERT` fix is printed. |
@@ -147,6 +159,7 @@ curl -fsSL https://raw.githubusercontent.com/wakumo/emudhra-check/main/emudhra-c
 | Problem found | Automatic fix | Needs password |
 |---|---|---|
 | `/etc/ssl/cert.pem` still has the affected roots (Apple curl/git/python3) | The advisory's workaround: remove the 2 roots. The original is kept as `/etc/ssl/cert.pem.pre-emudhra`. | yes |
+| The macOS trust store still trusts test chains (Safari, Apple curl/git/python3, Homebrew git, pip 24.2+) | Downloads the intermediates the test servers send and marks those whose SHA-256 is on the advisory's list as **Never Trust** in your login keychain. Undo: delete the `EM … CA - G3x` certificates in Keychain Access > login. | your login password (macOS dialog) |
 | Apple's built-in pip trusts the test servers | Sets `PIP_CERT=/etc/ssl/cert.pem` in your own `usercustomize.py` (same effect as the advisory's `sitecustomize.py`, but macOS does not block it) | no |
 | Homebrew ca-certificates / curl / git / node / python / uv / mise out of date | `brew update`, then `brew upgrade` for each formula, run as you. A formula that fails, or that Homebrew has disabled (such as `python@3.8`), does not stop the others. | no |
 | Old certifi or pip in a virtualenv, pyenv, conda or python.org Python | `python -m pip install --upgrade 'certifi>=2026.10.19'` / `'pip>=26.2.2'`. For a uv virtualenv without pip: `uv pip install`. For certifi installed with pip into Homebrew Python: the same with `--break-system-packages`. | no |
@@ -220,6 +233,12 @@ No. Step 12 only checks Docker images on this Mac, and step 13 only checks the c
 
 ---
 
+## Development
+
+Edit `emudhra-check.sh` directly. Before pushing, check that `shellcheck emudhra-check.sh` reports nothing and that it runs with the bash 3.2 that macOS ships (`/bin/bash emudhra-check.sh`). Keep the code compatible with bash 3.2: no associative arrays, no `mapfile`, no `${var,,}`.
+
+---
+
 ## Data source
 
 The test servers, root-certificate markers, the 16 compromised certificate fingerprints and the patched versions come from the advisory and its source repository:
@@ -227,4 +246,4 @@ The test servers, root-certificate markers, the 16 compromised certificate finge
 - https://emudhra.we-have-a-problem.com/
 - https://github.com/galadran/we-have-a-problem.com (`chains/`, `roots.json`, `impacted-intermediates.json`)
 
-If the advisory's "Who has patched?" table changes, update the `FIX_*` values near the top of `emudhra-check.sh`.
+If the advisory's "Who has patched?" table changes, update the `FIX_*` values in the "Advisory data" section of `emudhra-check.sh`.
