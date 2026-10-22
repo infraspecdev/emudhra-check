@@ -83,7 +83,7 @@ Với những thứ không thể kiểm tra trực tiếp, script đọc phiên 
 | Bước | Gì | Kiểm tra thế nào | Nếu FAIL |
 |---|---|---|---|
 | 1 | **Kết nối** | Máy có tới được 12 server thử nghiệm không? Có cấu hình proxy không? | Chỉ là cảnh báo. Trên mạng bị chặn, kết quả kiểm tra trực tiếp có thể không kết luận được. |
-| 2 | **macOS** | Bản cập nhật macOS đang chờ (`softwareupdate -l`). Thiết lập tin cậy tuỳ chỉnh trong Keychain cho chứng chỉ eMudhra/emSign/AAA. `/etc/ssl/cert.pem` còn chứa các root bị ảnh hưởng không: curl, git, python3, perl và ruby có sẵn của Apple dùng file này, và cập nhật macOS không sửa nó. Phiên bản trình duyệt chỉ để tham khảo. | Cài bản cập nhật và khởi động lại. Chạy bản sửa `/etc/ssl/cert.pem` của advisory (được in đầy đủ). Gỡ thiết lập tin cậy trong Keychain. |
+| 2 | **macOS** | Bản cập nhật macOS đang chờ (`softwareupdate -l`). Kiểm tra trực tiếp trust store của chính macOS (Safari và app native dùng nó; curl/git/python3 của Apple, git của Homebrew và pip 24.2+ cũng dựa vào nó). Thiết lập tin cậy tuỳ chỉnh trong Keychain cho chứng chỉ eMudhra/emSign/AAA. `/etc/ssl/cert.pem` còn chứa các root bị ảnh hưởng không: curl, git, python3, perl và ruby có sẵn của Apple dùng file này, và cập nhật macOS không sửa nó. Phiên bản trình duyệt chỉ để tham khảo. | Cài bản cập nhật và khởi động lại: chỉ bản cập nhật macOS mới sửa được trust store của macOS, nên công cụ nào chỉ còn tin các chain mà chính macOS tin sẽ được báo đúng như vậy. Chạy bản sửa `/etc/ssl/cert.pem` của advisory (được in đầy đủ). Gỡ thiết lập tin cậy trong Keychain. |
 | 3 | **curl** | Mọi curl trên máy (`/usr/bin/curl` của Apple, curl của Homebrew, các bản khác trong PATH) kết nối tới 12 server thử nghiệm. | Bản sửa `/etc/ssl/cert.pem`, hoặc `brew upgrade ca-certificates curl` |
 | 4 | **git** | `git ls-remote` qua HTTPS tới 12 server thử nghiệm, với từng git. Bỏ qua nếu không cài git. | Giống curl. Kiểm tra `http.sslCAInfo`. |
 | 5 | **Python** | Với mỗi Python 3 (Apple, Homebrew, python.org, pyenv, uv, conda, mise, asdf): (a) context `ssl` mặc định, dùng bởi `urllib`; (b) **certifi**, dùng bởi `requests`/`httpx`, kiểm tra trực tiếp và kiểm tra file; (c) **pip**, thử `pip download` thật. | Nâng `certifi` lên 2026.10.19 trở lên và `pip` lên 26.2.2 trở lên. Với pip của Apple, bản sửa `PIP_CERT` của advisory được in ra. |
@@ -147,11 +147,11 @@ curl -fsSL https://raw.githubusercontent.com/wakumo/emudhra-check/main/emudhra-c
 | Vấn đề | Cách tự sửa | Cần mật khẩu |
 |---|---|---|
 | `/etc/ssl/cert.pem` còn các root bị ảnh hưởng (curl/git/python3 của Apple) | Cách xử lý tạm của advisory: gỡ 2 root. Bản gốc được giữ ở `/etc/ssl/cert.pem.pre-emudhra`. | có |
-| pip có sẵn của Apple tin các server thử nghiệm | Bản sửa `sitecustomize.py` của advisory (`PIP_CERT=/etc/ssl/cert.pem`) | có |
+| pip có sẵn của Apple tin các server thử nghiệm | Đặt `PIP_CERT=/etc/ssl/cert.pem` trong `usercustomize.py` của user (tác dụng như `sitecustomize.py` của advisory, nhưng macOS không chặn) | không |
 | Homebrew ca-certificates / curl / git / node / python / uv / mise đã cũ | `brew update`, rồi `brew upgrade` từng formula, chạy dưới quyền bạn. Formula nào lỗi, hoặc bị Homebrew ngừng hỗ trợ (ví dụ `python@3.8`), không làm dừng các formula khác. | không |
 | certifi hoặc pip cũ trong virtualenv, pyenv, conda hoặc Python của python.org | `python -m pip install --upgrade 'certifi>=2026.10.19'` / `'pip>=26.2.2'`. Với virtualenv tạo bằng uv (không có pip): `uv pip install`. Với certifi cài bằng pip vào Python của Homebrew: thêm `--break-system-packages`. | không |
 | Python của python.org không kiểm tra được site nào | Chạy `Install Certificates.command` của nó | không |
-| Java tin các server thử nghiệm | Thêm 16 fingerprint bị lộ vào `blocked.certs` / `blacklisted.certs` của JDK. Bản gốc được giữ ở `*.pre-emudhra`. | nếu JDK cài cho toàn hệ thống |
+| Java tin các server thử nghiệm | Thêm 16 fingerprint bị lộ vào `blocked.certs` / `blacklisted.certs` của JDK (JDK của Homebrew thì thêm `brew upgrade`). Bản gốc được giữ ở `*.pre-emudhra`. Java nằm trong app (Android Studio, IntelliJ…) không bị sửa: hãy cập nhật app. | nếu JDK cài cho toàn hệ thống |
 | uv, pixi, rustup, deno, mise, Claude Code đã cũ | Lệnh tự cập nhật của chính chúng | không |
 
 Những mục sau **không** được sửa tự động. Script sẽ cho biết cần làm gì:

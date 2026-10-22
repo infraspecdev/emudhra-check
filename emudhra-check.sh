@@ -48,7 +48,7 @@
 #
 # Exit code: 0 = no FAIL, 1 = at least one FAIL, 2 = bad usage.
 
-SCRIPT_VERSION="1.2.0 (2026-10-22)"
+SCRIPT_VERSION="1.2.1 (2026-10-22)"
 
 main() {
 
@@ -330,6 +330,9 @@ py_pip_fix() {
   [ -f "$(dirname "$py")/../pyvenv.cfg" ] && venv=$(cd "$(dirname "$py")/.." && pwd -P)
   if [ -n "$venv" ]; then key="<venv:$venv|$spec>"; else r=$(resolve "$py"); key="<$r|$spec>"; fi
   case "$PYFIX_SEEN" in *"$key"*) return ;; esac
+  case "$spec" in   # no patched pip exists for end-of-life Python < 3.9
+    *pip\>*) ver_ge "$("$py" -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null </dev/null)" 3.9 || return ;;
+  esac
   PYFIX_SEEN="$PYFIX_SEEN$key"
   if [ -n "$venv" ]; then                                  # virtualenv: pip may always change it
     if ls -d "$venv"/lib/python*/site-packages/pip >/dev/null 2>&1; then
@@ -343,15 +346,25 @@ py_pip_fix() {
   fi
   f=$(brew_formula_of "$py")
   if [ -n "$f" ]; then                                     # Homebrew Python is externally managed
-    case "$spec" in
-      *certifi*)
-        case "$(resolve "${bundle:-/nonexistent}")" in
-          */Cellar/python-certifi/*) add_brew python-certifi ;;
-          *) add_fix 0 "Upgrade $spec installed with pip into Homebrew $f" \
-               "\"$py\" -m pip install --disable-pip-version-check --upgrade --break-system-packages $spec" ;;
-        esac ;;
-      *) add_brew "$f" ;;
+    local pkg=pip sp rb
+    case "$spec" in *certifi*) pkg=certifi ;; esac
+    if [ $pkg = certifi ] && [ -n "$bundle" ]; then
+      sp=$(dirname "$(dirname "$bundle")")
+    else
+      sp=$(dirname "$("$py" -c 'import os, pip; print(os.path.dirname(os.path.realpath(pip.__file__)))' 2>/dev/null </dev/null)")
+    fi
+    rb=$(resolve "${bundle:-/nonexistent}")
+    case "$rb" in
+      */Cellar/ca-certificates/*|*/etc/ca-certificates/*) add_brew ca-certificates; return ;;   # brew certifi links to it
+      */Cellar/*) add_brew "$(echo "$rb" | sed -E 's#.*/Cellar/([^/]+)/.*#\1#')"; return ;;
     esac
+    if grep -qx brew "$sp"/$pkg-*.dist-info/INSTALLER 2>/dev/null; then
+      # installed by a brew formula: pip refuses ("no RECORD file"), brew must do it
+      if [ $pkg = certifi ]; then add_brew ca-certificates; add_brew certifi; else add_brew "$f"; fi
+    else
+      add_fix 0 "Upgrade $spec installed with pip into Homebrew $f" \
+        "\"$py\" -m pip install --disable-pip-version-check --upgrade --break-system-packages $spec"
+    fi
     return
   fi
   case "$r" in /usr/bin/*|/Library/Developer/*|/Applications/Xcode*) return ;; esac
@@ -664,6 +677,36 @@ public class EmudhraCheck {
 }
 JAVAEOF
 
+# check_mac.js : one HTTPS request through Foundation (NSURLConnection), i.e. the
+# macOS trust store that Safari and native apps use. Prints ACCEPT or FAILED.
+# (Foundation classes only show up in JXA after importing Cocoa, and reading the
+# NSError back through Ref() crashes osascript, so no error details here.)
+cat > "$TMP/check_mac.js" <<'MACEOF'
+ObjC.import('Cocoa');
+function run(argv) {
+  var req = $.NSURLRequest.requestWithURLCachePolicyTimeoutInterval(
+    $.NSURL.URLWithString('https://' + argv[0] + '/'), 1, 12);
+  var d = $.NSURLConnection.sendSynchronousRequestReturningResponseError(req, null, null);
+  return (d === undefined || d === null || d.isNil()) ? 'FAILED' : 'ACCEPT';
+}
+MACEOF
+
+t_mac_one() {    # _ HOST : macOS trust store (Foundation via osascript)
+  local out rc st
+  out=$(run_to 20 /usr/bin/osascript -l JavaScript "$TMP/check_mac.js" "$2" 2>&1 </dev/null); rc=$?
+  case "$rc:$out" in
+    0:ACCEPT*) st=ACCEPT ;;
+    0:FAILED*)
+      # The request failed: REJECT if the server answers TLS at all (step 1 test), else NET
+      case "$(t_reach_one /usr/bin/curl "$2")" in
+        *" UP") st=REJECT; out="refused by the macOS trust store (server reachable)" ;;
+        *) st=NET; out="host not reachable" ;;
+      esac ;;
+    *) st=NET; out="probe failed (osascript exit $rc): $(echo "$out" | sed 's#.*check_mac.js: ##')" ;;
+  esac
+  echo "$2 $st $(echo "$out" | head -1 | cut -c1-160)"
+}
+
 # judge FILE : summarise a tester's output into J_STATUS / J_DETAIL
 judge() {
   local f="$1" h st rest acc=0 rej=0 net=0 acc_list="" first_net="" ctrl="" ctrl_d=""
@@ -678,6 +721,7 @@ judge() {
     logonly "              $h $st $rest"
   done < "$f"
   logonly "              $CONTROL_HOST (normal site) ${ctrl:-not tested} $ctrl_d"
+  J_ACC="${acc_list# }"
   local total=$((acc + rej + net)) ctrl_txt
   J_CTRL_FAIL=0; [ -n "$ctrl" ] && [ "$ctrl" != ACCEPT ] && J_CTRL_FAIL=1
   if [ "$ctrl" = ACCEPT ]; then ctrl_txt="normal site $CONTROL_HOST OK"
@@ -696,6 +740,27 @@ judge() {
   else
     J_STATUS=WARN; J_DETAIL="inconclusive: rejected $rej/$N_TEST, network errors $net/$N_TEST (first: $(echo "$first_net" | cut -c1-110))"
   fi
+}
+
+# Step 2 tests the macOS trust store itself. Tools that fall back to it (Apple's
+# curl/git/python3, Homebrew git through the system libcurl, pip >= 24.2 through
+# truststore) then trust the same chains, and only a macOS update fixes them.
+SYS_TESTED=0; SYS_ACC=""; CERTPEM_CLEAN=0
+SYS_FIX="macOS itself still trusts these chains (see step 2 'macOS trust store') and this tool asks macOS, so nothing to change in the tool. Install the pending macOS/Safari updates (System Settings > General > Software Update) and restart."
+# sys_covers : true if every chain the last judged client trusted is also trusted by macOS
+sys_covers() {
+  local h
+  [ -n "$SYS_ACC" ] && [ -n "$J_ACC" ] || return 1
+  for h in $J_ACC; do case " $SYS_ACC " in *" $h "*) ;; *) return 1 ;; esac; done
+}
+# apple_fix DEFAULT_FIX : fix text for a tool that may use the macOS trust store
+apple_fix() {
+  if sys_covers; then echo "$SYS_FIX"
+  elif [ $SYS_TESTED -eq 0 ] && [ $CERTPEM_CLEAN -eq 1 ]; then
+    echo "/etc/ssl/cert.pem is already clean, so this trust most likely comes from the macOS trust store: install the pending macOS/Safari updates (System Settings > General > Software Update) and restart."
+  elif [ -n "$SYS_ACC" ]; then
+    echo "$1 The chains macOS itself still trusts (step 2) need the pending macOS update."
+  else echo "$1"; fi
 }
 
 # ===========================================================================
@@ -842,10 +907,31 @@ if [ -f /etc/ssl/cert.pem ]; then
 "Advisory workaround (needs admin password; macOS updates may restore the file):
 sudo cp -p /etc/ssl/cert.pem /etc/ssl/cert.pem.bak && sudo awk '/^(###|===) /{skip=0} /^=== .*\\/CN=(AAA Certificate Services|emSign ECC Root CA - G3)\$/{skip=1} !skip' /etc/ssl/cert.pem.bak | sudo tee /etc/ssl/cert.pem > /dev/null"
   else
+    CERTPEM_CLEAN=1
     record PASS "/etc/ssl/cert.pem" "does not contain the affected roots ($(cert_count /etc/ssl/cert.pem) certificates)"
   fi
 else
   record SKIP "/etc/ssl/cert.pem" "file not found"
+fi
+
+check_start
+if [ "$(uname -s)" = Darwin ] && [ -x /usr/bin/osascript ]; then
+  par_hosts t_mac_one "" "$TMP/res"
+  judge "$TMP/res"
+  fix=""
+  if [ $J_STATUS = FAIL ]; then
+    SYS_TESTED=1; SYS_ACC="$J_ACC"
+    if [ -n "$important" ]; then
+      fix="Install the pending updates (${important%;}) and restart. Until then Safari, Mail and other native apps, and tools that ask macOS (Apple's curl/git/python3, pip), trust these chains."
+    else
+      fix="No macOS update is listed, yet macOS still trusts these chains. Check System Settings > General > Software Update again, restart, and tell IT if it persists."
+    fi
+  elif [ $J_STATUS = PASS ]; then
+    SYS_TESTED=1
+  fi
+  record $J_STATUS "macOS trust store (Safari, native apps)" "$J_DETAIL" "$fix"
+else
+  record SKIP "macOS trust store" "not macOS"
 fi
 
 check_start
@@ -881,8 +967,10 @@ while IFS= read -r b; do
   fix=""
   if [ $J_STATUS = FAIL ]; then
     case "$b" in
-      /usr/bin/curl) fix="Apply the /etc/ssl/cert.pem fix from step 2 (macOS updates do not update that file)." ;;
-      */homebrew/*|/usr/local/*) fix="brew update && brew upgrade ca-certificates curl"; add_brew ca-certificates; add_brew curl ;;
+      /usr/bin/curl) fix=$(apple_fix "Apply the /etc/ssl/cert.pem fix from step 2 (macOS updates do not update that file).") ;;
+      */homebrew/*|/usr/local/*)
+        if sys_covers; then fix="$SYS_FIX"
+        else fix="brew update && brew upgrade ca-certificates curl"; add_brew ca-certificates; add_brew curl; fi ;;
       *) fix="Update the CA bundle used by this curl (curl -V shows the build; see $ADVISORY)." ;;
     esac
   fi
@@ -908,8 +996,11 @@ while IFS= read -r b; do
   fix=""
   if [ $J_STATUS = FAIL ]; then
     case "$b" in
-      /usr/bin/git) fix="Apply the /etc/ssl/cert.pem fix from step 2. Also check 'git config --global --get http.sslCAInfo'." ;;
-      */homebrew/*|/usr/local/*) fix="brew update && brew upgrade ca-certificates git. Also check 'git config --global --get http.sslCAInfo'."; add_brew ca-certificates; add_brew git ;;
+      /usr/bin/git) fix=$(apple_fix "Apply the /etc/ssl/cert.pem fix from step 2. Also check 'git config --global --get http.sslCAInfo'.") ;;
+      */homebrew/*|/usr/local/*)
+        # Homebrew git uses macOS's libcurl, which falls back to the macOS trust store
+        if sys_covers; then fix="$SYS_FIX"
+        else fix="brew update && brew upgrade ca-certificates git. Also check 'git config --global --get http.sslCAInfo'."; add_brew ca-certificates; add_brew git; fi ;;
       *) fix="Update the CA bundle this git uses ('git config --show-origin --get-regexp http.ssl')." ;;
     esac
   fi
@@ -956,7 +1047,7 @@ while IFS= read -r py; do
   fix=""
   if [ $J_STATUS = FAIL ]; then
     case "$cafile" in
-      /etc/ssl/cert.pem|/private/etc/ssl/cert.pem) fix="This Python uses /etc/ssl/cert.pem: apply the fix from step 2." ;;
+      /etc/ssl/cert.pem|/private/etc/ssl/cert.pem) fix=$(apple_fix "This Python uses /etc/ssl/cert.pem: apply the fix from step 2.") ;;
       */homebrew/*|/usr/local/*) fix="brew update && brew upgrade ca-certificates"; add_brew ca-certificates ;;
       *) fix="Python uses $cafile; update that bundle (for python.org builds: upgrade certifi and run 'Install Certificates.command')." ;;
     esac
@@ -1022,15 +1113,34 @@ while IFS= read -r py; do
     N_TEST=$N_SAVE
     J_DETAIL=$(echo "$J_DETAIL" | sed "s/normal site $CONTROL_HOST/normal index $PIP_CONTROL_HOST/")
     fix=""
+    pipcert=$(grep '^#pipcert ' "$TMP/py.out" | cut -d' ' -f2-)
     if [ $J_STATUS = FAIL ]; then
-      if [ "$py" = /usr/bin/python3 ]; then
-        fix="Built-in pip uses its own old copy of the roots. After the step 2 fix, run (advisory):
-F=\"\$(/usr/bin/python3 -c 'import sysconfig; print(sysconfig.get_path(\"stdlib\"))')/sitecustomize.py\" && echo 'import os; os.environ.setdefault(\"PIP_CERT\", \"/etc/ssl/cert.pem\")' | sudo tee -a \"\$F\" > /dev/null && sudo chmod 644 \"\$F\""
-        stdlib=$(/usr/bin/python3 -c 'import sysconfig; print(sysconfig.get_path("stdlib"))' 2>/dev/null </dev/null)
-        [ -n "$stdlib" ] && add_fix 1 "Make Apple's pip use the fixed /etc/ssl/cert.pem (advisory, sitecustomize.py)" \
-          "F='$stdlib/sitecustomize.py'; grep -q PIP_CERT \"\$F\" 2>/dev/null || echo 'import os; os.environ.setdefault(\"PIP_CERT\", \"/etc/ssl/cert.pem\")' >> \"\$F\"; chmod 644 \"\$F\""
+      if { sys_covers || [ $SYS_TESTED -eq 0 ]; } && ver_ge "$pipv" 24.2 && ver_ge "$pv" 3.10; then
+        # pip >= 24.2 on Python >= 3.10 verifies through macOS (truststore)
+        fix="$SYS_FIX"
+      elif sys_covers && [ "${pipcert:--}" != - ]; then
+        # pip >= 24.2 (Python >= 3.10) verifies through macOS (truststore); with
+        # PIP_CERT=/etc/ssl/cert.pem Apple's Python falls back to macOS too.
+        fix="$SYS_FIX"
+      elif ver_ge "$pipv" "$FIX_PIP"; then
+        fix="pip $pipv is already patched, so the trusted chains come from its certificate settings: check PIP_CERT, REQUESTS_CA_BUNDLE and 'pip config list' (cert=...)."
+      elif ! ver_ge "$pv" 3.9; then
+        fix="Python $pv is end-of-life and has no patched pip. Remove it if unused$(f=$(brew_formula_of "$py"); [ -n "$f" ] && echo " (brew uninstall $f)"), or run its pip with --cert /etc/ssl/cert.pem (after the step 2 fix)."
+      elif [ "$py" = /usr/bin/python3 ]; then
+        # The advisory puts PIP_CERT in the stdlib sitecustomize.py, but that file
+        # lives inside Xcode.app / CommandLineTools, which macOS often refuses to
+        # change ("Operation not permitted"). The per-user usercustomize.py does
+        # the same for this user, without sudo.
+        usite=$(/usr/bin/python3 -c 'import site; print(site.getusersitepackages())' 2>/dev/null </dev/null)
+        [ -n "$usite" ] || usite="$HOME/Library/Python/$(echo "$pv" | cut -d. -f1-2)/lib/python/site-packages"
+        fix="Built-in pip uses its own old copy of the roots. After the step 2 fix, point it at /etc/ssl/cert.pem (no sudo needed):
+mkdir -p \"$usite\" && echo 'import os; os.environ.setdefault(\"PIP_CERT\", \"/etc/ssl/cert.pem\")' >> \"$usite/usercustomize.py\""
+        add_fix 0 "Make Apple's pip use the fixed /etc/ssl/cert.pem (usercustomize.py for your user)" \
+          "mkdir -p '$usite' && F='$usite/usercustomize.py' && { grep -q PIP_CERT \"\$F\" 2>/dev/null || echo 'import os; os.environ.setdefault(\"PIP_CERT\", \"/etc/ssl/cert.pem\")' >> \"\$F\"; }"
       else
         fix="\"$py\" -m pip install --upgrade 'pip>=$FIX_PIP'"
+        [ -n "$(brew_formula_of "$py")" ] && fix="\"$py\" -m pip install --upgrade --break-system-packages 'pip>=$FIX_PIP'"
+        [ -n "$SYS_ACC" ] && fix="$fix   (chains macOS itself still trusts, see step 2, need the pending macOS update)"
         py_pip_fix "$py" "'pip>=$FIX_PIP'"
       fi
     elif ! ver_ge "$pipv" "$FIX_PIP" && [ $J_STATUS = PASS ]; then
@@ -1072,7 +1182,11 @@ while IFS= read -r nb; do
     fix="Upgrade Node to a patched release (${ps#FAIL:}; newer majors are fine). Temporary workaround: NODE_OPTIONS=--use-system-ca"
   elif [ "$ps" != PASS ] && [ $J_STATUS = PASS ]; then
     J_STATUS=WARN
-    fix="Upgrade Node to ${ps#FAIL:} or newer. It passes here only because of your current settings (NODE_OPTIONS='$NODE_OPTIONS')."
+    if [ -n "$NODE_OPTIONS$NODE_EXTRA_CA_CERTS" ]; then
+      fix="Upgrade Node to ${ps#FAIL:} or newer. It may pass here only because of your current settings (NODE_OPTIONS='$NODE_OPTIONS' NODE_EXTRA_CA_CERTS='$NODE_EXTRA_CA_CERTS')."
+    else
+      fix="Upgrade Node to ${ps#FAIL:} or newer. It passes the live test, but Node $(major "$nv") is not on the advisory's patched list (odd/old release lines get no fix)."
+    fi
   fi
   record $J_STATUS "node $nv ($nb)" "$J_DETAIL" "$fix"
 done < "$TMP/list"
@@ -1136,11 +1250,28 @@ while IFS= read -r jh; do
   J_DETAIL="$J_DETAIL; $(basename "${bc:-blocked.certs}") has $nb/16 fingerprints"
   fix=""
   if [ $J_STATUS = FAIL ]; then
-    fix="Upgrade this JDK to a patched release (${ps#FAIL:}), or add the 16 SHA-256 fingerprints from impacted-intermediates.json to ${bc:-$jh/lib/security/blocked.certs}. Do not delete roots from cacerts."
     jf=$(brew_formula_of "$jh/bin/java")
-    if [ -n "$jf" ]; then
+    case "$jh" in
+      /Applications/*.app/*)
+        # A runtime bundled in an app (Android Studio, IntelliJ...): macOS blocks
+        # edits inside apps, and they would break the app's signature.
+        japp=$(echo "$jh" | sed -E 's#^/Applications/([^/]+)\.app/.*#\1#')
+        fix="This Java runtime is bundled inside $japp. Update $japp (it ships its own Java); do not edit files inside the app."
+        bc="" ;;
+      *)
+        if [ "$ps" = PASS ]; then
+          fix="Version $jv is a patched release, but this JDK still trusts the test chains. Add the 16 SHA-256 fingerprints from impacted-intermediates.json to ${bc:-$jh/lib/security/blocked.certs}. Do not delete roots from cacerts."
+        else
+          fix="Upgrade this JDK to a patched release (${ps#FAIL:}), or add the 16 SHA-256 fingerprints from impacted-intermediates.json to ${bc:-$jh/lib/security/blocked.certs}. Do not delete roots from cacerts."
+        fi ;;
+    esac
+    # Homebrew can lag behind the patched release: upgrade and also block the
+    # fingerprints in the current keg (Cellar files are writable).
+    if [ -n "$jf" ] && [ "$ps" != PASS ]; then
       add_brew "$jf"
-    elif [ -n "$bc" ]; then
+      fix="brew update && brew upgrade $jf (Homebrew may not have ${ps#FAIL:} yet). Also add the 16 SHA-256 fingerprints from impacted-intermediates.json to ${bc:-$jh/lib/security/blocked.certs}. Do not delete roots from cacerts."
+    fi
+    if [ -n "$bc" ]; then
       js=1; [ -w "$bc" ] && js=0
       add_fix $js "Block the 16 compromised certificates in $bc (backup kept)" \
         "f='$bc'; [ -f \"\$f.pre-emudhra\" ] || cp -p \"\$f\" \"\$f.pre-emudhra\"; for h in $(echo $BAD_SHA256); do grep -qi \"\$h\" \"\$f\" || echo \"\$h\" >> \"\$f\"; done"
@@ -1193,7 +1324,12 @@ for p in $BREW_PREFIXES; do
     [ -f "$f" ] || continue
     check_start
     roots=$(bundle_roots "$f")
-    if [ -n "$roots" ]; then record FAIL "Homebrew bundle $f" "still contains: $roots" "brew update && brew upgrade ca-certificates && brew postinstall ca-certificates"; add_brew ca-certificates
+    if [ -n "$roots" ]; then
+      case "$f" in
+        */etc/openssl/cert.pem) record WARN "Homebrew bundle $f" "still contains: $roots; leftover from the old Homebrew openssl (1.0), current OpenSSL uses etc/openssl@3" \
+          "Delete $f if nothing uses it (old openssl 1.0 builds only)." ;;
+        *) record FAIL "Homebrew bundle $f" "still contains: $roots" "brew update && brew upgrade ca-certificates && brew postinstall ca-certificates"; add_brew ca-certificates ;;
+      esac
     else record PASS "Homebrew bundle $f" "affected roots not present"; fi
   done
 done
@@ -1348,13 +1484,32 @@ else
       pyxy=$(echo "$f" | sed -nE 's#.*/lib/python([0-9]+\.[0-9]+)/site-packages/.*#\1#p')
       envpy=""
       if [ -n "$pyxy" ]; then
-        for c in "$envp/bin/python$pyxy" "$envp/bin/python3" "$envp/bin/python"; do
+        # keg-only/unlinked Homebrew pythons use <prefix>/lib/pythonX.Y but live in <prefix>/opt/python@X.Y
+        for c in "$envp/bin/python$pyxy" "$envp/opt/python@$pyxy/bin/python$pyxy" "$envp/bin/python3" "$envp/bin/python"; do
           [ -z "$envpy" ] && [ -x "$c" ] || continue
           [ "$("$c" -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null </dev/null)" = "$pyxy" ] && envpy="$c"
         done
       fi
       sp=$(echo "$f" | sed -E 's#(/site-packages)/.*#\1#')
-      if [ -n "$pyxy" ] && [ -z "$envpy" ]; then
+      # a vendored pip copy only matters if it is the pip that Python imports
+      pipown=""
+      case "$f" in
+        */pip/_vendor/*)
+          pipdir=$(echo "$f" | sed -E 's#(.*/pip)/_vendor/.*#\1#')
+          if [ -n "$envpy" ]; then
+            pipused=$("$envpy" -c 'import os, pip; print(os.path.dirname(os.path.realpath(pip.__file__)))' 2>/dev/null </dev/null)
+            [ -n "$pipused" ] && [ "$pipused" = "$(cd -P "$pipdir" 2>/dev/null && pwd -P)" ] && pipown=yes || pipown=no
+          elif [ -z "$pyxy" ]; then
+            pipown=src
+          fi ;;
+      esac
+      if [ "$pipown" = src ]; then
+        bst=WARN; bnote="; a copy inside pip's source/build tree, not an installed pip"
+        fx="No Python loads this copy, so it is safe to ignore. It goes away when the package that ships it is upgraded or removed."
+      elif [ "$pipown" = no ]; then
+        bst=WARN; bnote="; not the pip that Python $pyxy uses (${pipused:-it has no pip})"
+        fx="Leftover pip copy. Delete $pipdir if nothing uses it."
+      elif [ -n "$pyxy" ] && [ -z "$envpy" ]; then
         bst=WARN
         if [ -f "$envp/pyvenv.cfg" ]; then
           bnote="; virtualenv whose Python $pyxy no longer runs"
@@ -1365,13 +1520,16 @@ else
         fi
       else
         case "$f" in
-          */pip/_vendor/certifi/*) fx="This is pip's vendored copy: upgrade pip in that environment (pip >= $FIX_PIP)."
+          */pip/_vendor/*) fx="This is pip's vendored copy: upgrade pip in that environment (pip >= $FIX_PIP)."
+            ver_ge "$pyxy" 3.9 || fx="pip's vendored copy for Python $pyxy, which is end-of-life and has no patched pip. Remove that Python if unused."
             [ -n "$envpy" ] && py_pip_fix "$envpy" "'pip>=$FIX_PIP'" "$f" ;;
           */site-packages/certifi/*)
             if [ -d "$sp/pip" ]; then
               fx="\"${envpy:-$envp/bin/python}\" -m pip install --upgrade 'certifi>=$FIX_CERTIFI'   (delete the environment if unused)"
-            else
+            elif [ -n "$(firstbin $(path_bins uv) "$HOME/.local/bin/uv" "$HOME/.cargo/bin/uv" /opt/homebrew/bin/uv /usr/local/bin/uv)" ]; then
               fx="uv pip install --python \"${envpy:-$envp/bin/python}\" --upgrade 'certifi>=$FIX_CERTIFI'   (no pip in this environment; delete it if unused)"
+            else
+              fx="This environment has no pip (probably made by uv, which is not installed now). Delete $envp if unused; otherwise install uv (brew install uv) and run: uv pip install --python \"${envpy:-$envp/bin/python}\" --upgrade 'certifi>=$FIX_CERTIFI'"
             fi
             [ -n "$envpy" ] && py_pip_fix "$envpy" "'certifi>=$FIX_CERTIFI'" "$f" ;;
           */botocore/cacert.pem)
@@ -1386,6 +1544,12 @@ else
             fx="Delete this file if nothing uses it (current Homebrew OpenSSL uses etc/openssl@3)." ;;
           */Cellar/*) fm=$(echo "$f" | sed -E 's#.*/Cellar/([^/]+)/.*#\1#')
             fx="Part of Homebrew $fm: brew upgrade $fm (or brew uninstall $fm if unused)." ;;
+          */gems/aws-sdk-core-*/ca-bundle.crt) bst=WARN; bnote="; used only when an app calls Aws.use_bundled_cert!"
+            fx="Ruby gem aws-sdk-core: gem update aws-sdk-core (with the Ruby that owns this folder)." ;;
+          */gems/*/gems/*) gm=$(echo "$f" | sed -E 's#.*/gems/[^/]+/gems/([^/]+)-[0-9][^/]*/.*#\1#')
+            fx="Ruby gem $gm ships this file: gem update $gm (with the Ruby that owns this folder)." ;;
+          */node_modules/*) gm=$(echo "$f" | sed -E 's#.*/node_modules/((@[^/]+/)?[^/]+)/.*#\1#')
+            fx="npm package $gm ships this file: update it in that project (npm update $gm)." ;;
           */homebrew/*) fx="brew update && brew upgrade" ;;
           *) fx="Update the software that ships this file (or ignore if unused)." ;;
         esac
@@ -1701,6 +1865,9 @@ apply_fixes() {
       n_bad=$((n_bad + 1))
       fixline FAILED "${FX_LABEL[$i]} (exit $rc)" "$(fmt_secs $((t1 - t0)))"
       tail -3 "$outf" | while IFS= read -r l; do out "           ${C_SKIP}| $l${C_OFF}"; done
+      if grep -q 'Operation not permitted' "$outf"; then
+        out "           ${C_WARN}macOS blocked this change (files inside an app or a protected folder). Do it by hand, or allow Terminal in System Settings > Privacy & Security > App Management, then run --fix again.${C_OFF}"
+      fi
     fi
     i=$((i + 1))
   done

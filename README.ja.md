@@ -85,7 +85,7 @@ ev-g3c-emudhra.we-have-a-problem.com      ev-g3c-aaa-emudhra.we-have-a-problem.c
 | ステップ | 対象 | チェック方法 | FAIL の場合 |
 |---|---|---|---|
 | 1 | **接続** | この Mac から 12 台のテストサーバーにつながるか。プロキシが設定されているか。 | 警告のみです。通信が遮断されたネットワークでは、接続テストの結果が判定できないことがあります。 |
-| 2 | **macOS** | 保留中の macOS アップデート (`softwareupdate -l`)。キーチェーンで eMudhra / emSign / AAA の証明書に独自の信頼設定がないか。`/etc/ssl/cert.pem` に影響を受けるルートがまだ含まれていないか (Apple 標準の curl、git、python3、perl、ruby はこのファイルを使いますが、macOS のアップデートでは修正されません)。ブラウザのバージョンは参考として表示します。 | アップデートをインストールして再起動します。アドバイザリーの `/etc/ssl/cert.pem` の修正を実行します (コマンド全体が表示されます)。キーチェーンの信頼設定を元に戻します。 |
+| 2 | **macOS** | 保留中の macOS アップデート (`softwareupdate -l`)。macOS 自身のトラストストアの接続テスト (Safari やネイティブアプリが使用。Apple の curl / git / python3、Homebrew の git、pip 24.2 以降もこれにフォールバックします)。キーチェーンで eMudhra / emSign / AAA の証明書に独自の信頼設定がないか。`/etc/ssl/cert.pem` に影響を受けるルートがまだ含まれていないか (Apple 標準の curl、git、python3、perl、ruby はこのファイルを使いますが、macOS のアップデートでは修正されません)。ブラウザのバージョンは参考として表示します。 | アップデートをインストールして再起動します。macOS のトラストストアは macOS のアップデートでしか直らないため、macOS 自身が信頼しているチェーンだけを信頼しているツールにはそのことだけを表示します。アドバイザリーの `/etc/ssl/cert.pem` の修正を実行します (コマンド全体が表示されます)。キーチェーンの信頼設定を元に戻します。 |
 | 3 | **curl** | Mac 上のすべての curl (Apple の `/usr/bin/curl`、Homebrew の curl、PATH 上のその他) が 12 台のテストサーバーに接続します。 | `/etc/ssl/cert.pem` の修正、または `brew upgrade ca-certificates curl` |
 | 4 | **git** | git ごとに、12 台のテストサーバーに対して HTTPS で `git ls-remote` を実行します。git がなければスキップします。 | curl と同じです。`http.sslCAInfo` も確認してください。 |
 | 5 | **Python** | Python 3 ごと (Apple、Homebrew、python.org、pyenv、uv、conda、mise、asdf) に、(a) `urllib` が使う既定の `ssl` コンテキスト、(b) `requests` / `httpx` が使う **certifi** (接続テストとファイルのチェック)、(c) **pip** (実際に `pip download` を試行) を調べます。 | `certifi` を 2026.10.19 以降に、`pip` を 26.2.2 以降にアップグレードします。Apple の pip には、アドバイザリーの `PIP_CERT` の修正が表示されます。 |
@@ -149,11 +149,11 @@ curl -fsSL https://raw.githubusercontent.com/wakumo/emudhra-check/main/emudhra-c
 | 見つかった問題 | 自動修正の内容 | パスワード |
 |---|---|---|
 | `/etc/ssl/cert.pem` に影響を受けるルートが残っている (Apple の curl / git / python3) | アドバイザリーの回避策: 2 つのルートを削除します。元のファイルは `/etc/ssl/cert.pem.pre-emudhra` として残します。 | 必要 |
-| Apple 標準の pip がテストサーバーを信頼している | アドバイザリーの `sitecustomize.py` の修正 (`PIP_CERT=/etc/ssl/cert.pem`) | 必要 |
+| Apple 標準の pip がテストサーバーを信頼している | ユーザー自身の `usercustomize.py` に `PIP_CERT=/etc/ssl/cert.pem` を設定します (アドバイザリーの `sitecustomize.py` と同じ効果で、macOS にブロックされません) | 不要 |
 | Homebrew の ca-certificates / curl / git / node / python / uv / mise が古い | `brew update` の後、formula ごとに `brew upgrade` を実行します (ご自身のユーザーで実行)。失敗した formula や、Homebrew で無効化された formula (`python@3.8` など) があっても、他の formula は続行します。 | 不要 |
 | virtualenv、pyenv、conda、python.org の Python の certifi または pip が古い | `python -m pip install --upgrade 'certifi>=2026.10.19'` / `'pip>=26.2.2'`。pip のない uv の virtualenv では `uv pip install`。Homebrew の Python に pip で入れた certifi は `--break-system-packages` を付けて同様に実行します。 | 不要 |
 | python.org の Python がどのサイトも検証できない | その Python の `Install Certificates.command` を実行します | 不要 |
-| Java がテストサーバーを信頼している | 漏えいした 16 個のフィンガープリントを JDK の `blocked.certs` / `blacklisted.certs` に追加します。元のファイルは `*.pre-emudhra` として残します。 | JDK がシステム全体にインストールされている場合は必要 |
+| Java がテストサーバーを信頼している | 漏えいした 16 個のフィンガープリントを JDK の `blocked.certs` / `blacklisted.certs` に追加します (Homebrew の JDK は `brew upgrade` も実行)。元のファイルは `*.pre-emudhra` として残します。アプリに同梱された Java (Android Studio、IntelliJ など) は変更しません。アプリをアップデートしてください。 | JDK がシステム全体にインストールされている場合は必要 |
 | uv、pixi、rustup、deno、mise、Claude Code が古い | 各ツール自身のセルフアップデートのコマンド | 不要 |
 
 次のものは自動では**修正されません**。何をすればよいかはスクリプトが表示します。

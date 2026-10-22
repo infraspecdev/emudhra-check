@@ -83,7 +83,7 @@ For things that cannot be tested live, the script reads the version or the certi
 | Step | What | How it is checked | If it FAILs |
 |---|---|---|---|
 | 1 | **Connectivity** | Can this Mac reach the 12 test servers? Is a proxy configured? | Only a warning. Live results may be inconclusive on a blocked network. |
-| 2 | **macOS** | Pending macOS updates (`softwareupdate -l`). Custom Keychain trust for eMudhra/emSign/AAA certificates. Whether `/etc/ssl/cert.pem` still contains the affected roots: Apple's built-in curl, git, python3, perl and ruby use that file, and macOS updates do not fix it. Browser versions are shown for reference. | Install updates and restart. Run the advisory's `/etc/ssl/cert.pem` fix, which is printed in full. Reset the Keychain trust. |
+| 2 | **macOS** | Pending macOS updates (`softwareupdate -l`). A live test of the macOS trust store itself (what Safari and native apps use; Apple's curl/git/python3, Homebrew git and pip 24.2+ also fall back to it). Custom Keychain trust for eMudhra/emSign/AAA certificates. Whether `/etc/ssl/cert.pem` still contains the affected roots: Apple's built-in curl, git, python3, perl and ruby use that file, and macOS updates do not fix it. Browser versions are shown for reference. | Install updates and restart: only a macOS update fixes the macOS trust store, so tools that only fail on chains macOS itself trusts are told just that. Run the advisory's `/etc/ssl/cert.pem` fix, which is printed in full. Reset the Keychain trust. |
 | 3 | **curl** | Every curl on the Mac (Apple's `/usr/bin/curl`, Homebrew curl, others in your PATH) connects to the 12 test servers. | `/etc/ssl/cert.pem` fix, or `brew upgrade ca-certificates curl` |
 | 4 | **git** | `git ls-remote` over HTTPS against the 12 test servers, for each git. Skipped if git is not installed. | Same as curl. Check `http.sslCAInfo`. |
 | 5 | **Python** | For each Python 3 (Apple, Homebrew, python.org, pyenv, uv, conda, mise, asdf): (a) the default `ssl` context, used by `urllib`; (b) **certifi**, used by `requests`/`httpx`, live test plus a check of its file; (c) **pip**, a real `pip download` attempt. | Upgrade `certifi` to 2026.10.19 or later and `pip` to 26.2.2 or later. For Apple's pip, the advisory's `PIP_CERT` fix is printed. |
@@ -147,11 +147,11 @@ curl -fsSL https://raw.githubusercontent.com/wakumo/emudhra-check/main/emudhra-c
 | Problem found | Automatic fix | Needs password |
 |---|---|---|
 | `/etc/ssl/cert.pem` still has the affected roots (Apple curl/git/python3) | The advisory's workaround: remove the 2 roots. The original is kept as `/etc/ssl/cert.pem.pre-emudhra`. | yes |
-| Apple's built-in pip trusts the test servers | The advisory's `sitecustomize.py` fix (`PIP_CERT=/etc/ssl/cert.pem`) | yes |
+| Apple's built-in pip trusts the test servers | Sets `PIP_CERT=/etc/ssl/cert.pem` in your own `usercustomize.py` (same effect as the advisory's `sitecustomize.py`, but macOS does not block it) | no |
 | Homebrew ca-certificates / curl / git / node / python / uv / mise out of date | `brew update`, then `brew upgrade` for each formula, run as you. A formula that fails, or that Homebrew has disabled (such as `python@3.8`), does not stop the others. | no |
 | Old certifi or pip in a virtualenv, pyenv, conda or python.org Python | `python -m pip install --upgrade 'certifi>=2026.10.19'` / `'pip>=26.2.2'`. For a uv virtualenv without pip: `uv pip install`. For certifi installed with pip into Homebrew Python: the same with `--break-system-packages`. | no |
 | python.org Python cannot verify any site | Runs its `Install Certificates.command` | no |
-| Java trusts the test servers | Adds the 16 compromised fingerprints to the JDK's `blocked.certs` / `blacklisted.certs`. The original is kept as `*.pre-emudhra`. | if the JDK is system-wide |
+| Java trusts the test servers | Adds the 16 compromised fingerprints to the JDK's `blocked.certs` / `blacklisted.certs` (for a Homebrew JDK also `brew upgrade`). The original is kept as `*.pre-emudhra`. A Java runtime inside an app (Android Studio, IntelliJ…) is not changed: update the app. | if the JDK is system-wide |
 | uv, pixi, rustup, deno, mise, Claude Code out of date | Their own self-update command | no |
 
 These are **not** fixed automatically. The script tells you what to do:
