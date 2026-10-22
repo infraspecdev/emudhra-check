@@ -48,7 +48,7 @@
 #
 # Exit code: 0 = no FAIL, 1 = at least one FAIL, 2 = bad usage.
 
-SCRIPT_VERSION="1.1.0 (2026-10-22)"
+SCRIPT_VERSION="1.2.0 (2026-10-22)"
 
 main() {
 
@@ -161,12 +161,27 @@ done
 # ---------------------------------------------------------------------------
 # Output helpers
 # ---------------------------------------------------------------------------
+# PRETTY=1 (a color terminal): compact screen output with icons. The log file
+# always gets the plain, complete format (grep-friendly).
 if [ $OPT_COLOR -eq 1 ] && [ -t 1 ]; then
   C_PASS=$'\033[32m'; C_FAIL=$'\033[31;1m'; C_WARN=$'\033[33m'; C_SKIP=$'\033[90m'
   C_INFO=$'\033[36m'; C_BOLD=$'\033[1m'; C_OFF=$'\033[0m'
+  PRETTY=1
+  # icons and cut-to-width need a UTF-8 locale (the macOS Terminal default).
+  # No locale set at all: use UTF-8 for this shell only (not exported).
+  if [ -z "$LC_ALL$LC_CTYPE$LANG" ]; then { LC_CTYPE=en_US.UTF-8; } 2>/dev/null; fi
+  case "${LC_ALL:-${LC_CTYPE:-$LANG}}" in *[Uu][Tt][Ff]-8*|*[Uu][Tt][Ff]8*) ;; *) PRETTY=0 ;; esac
 else
   C_PASS=""; C_FAIL=""; C_WARN=""; C_SKIP=""; C_INFO=""; C_BOLD=""; C_OFF=""
+  PRETTY=0
 fi
+TERM_W=""
+[ $PRETTY -eq 1 ] && TERM_W=$(stty size </dev/tty 2>/dev/null | awk '{print $2}')
+case "$TERM_W" in ''|*[!0-9]*) TERM_W=$(tput cols 2>/dev/null) ;; esac
+case "$TERM_W" in ''|*[!0-9]*) TERM_W=100 ;; esac
+[ "$TERM_W" -lt 70 ] && TERM_W=70
+[ "$TERM_W" -gt 150 ] && TERM_W=150
+RULE_W=$TERM_W; [ $RULE_W -gt 92 ] && RULE_W=92
 
 if [ -z "$OPT_LOG" ]; then
   d="$HOME/Desktop"; [ -d "$d" ] && [ -w "$d" ] || d="$HOME"
@@ -198,18 +213,64 @@ out() {
   printf '%s\n' "$1" | sed $'s/\033\\[[0-9;]*m//g' >> "$LOG"
 }
 logonly() { printf '%s\n' "$1" >> "$LOG"; }
+# scr <text> : terminal only (pretty mode). plain <text> : log; also the
+# terminal when not in pretty mode.
+scr() { [ $PRETTY -eq 1 ] && printf '%s\n' "$1"; return 0; }
+plain() { if [ $PRETTY -eq 1 ]; then logonly "$1"; else out "$1"; fi; }
+
+# icon STATUS : single-codepoint emoji (always 2 cells wide, so columns line up)
+icon() {
+  case $1 in
+    PASS|DONE) printf '%s' "✅" ;; FAIL|FAILED) printf '%s' "❌" ;; WARN) printf '%s' "🟡" ;;
+    SKIP) printf '%s' "⚪" ;; RUN) printf '%s' "⏳" ;; *) printf '%s' "🔵" ;;
+  esac
+}
+stcol() {
+  case $1 in
+    PASS|DONE) printf '%s' "$C_PASS" ;; FAIL|FAILED) printf '%s' "$C_FAIL" ;; WARN) printf '%s' "$C_WARN" ;;
+    SKIP) printf '%s' "$C_SKIP" ;; *) printf '%s' "$C_INFO" ;;
+  esac
+}
+# tilde TEXT : $HOME shown as ~ (screen only)
+tilde() { local t='~'; printf '%s' "${1//"$HOME"/$t}"; }
+# fit TEXT WIDTH : cut to WIDTH characters with an ellipsis
+fit() {
+  if [ ${#1} -gt "$2" ]; then printf '%s…' "${1:0:$(($2 - 1))}"; else printf '%s' "$1"; fi
+}
+# fitm TEXT WIDTH : cut in the middle, keeping the end (paths end with the useful part)
+fitm() {
+  local h t
+  if [ ${#1} -gt "$2" ]; then h=$(($2 / 3)); t=$(($2 - h - 1)); printf '%s…%s' "${1:0:$h}" "${1:$((${#1} - t))}"
+  else printf '%s' "$1"; fi
+}
+# padr TEXT N : TEXT padded with spaces to N characters (printf pads bytes)
+padr() { local k=$(($2 - ${#1})); printf '%s' "$1"; [ $k -gt 0 ] && printf "%${k}s" ''; return 0; }
+# rule TITLE [RIGHT] : "━━ TITLE ━━━━━━━━━━━ RIGHT" across the screen
+rule() {
+  local left="━━ $1 " right="${2:+ $2}" n
+  n=$((RULE_W - ${#left} - ${#right}))
+  [ $n -lt 3 ] && n=3
+  printf '%s%s%s%s%s%s\n' "$C_BOLD" "$left" "$(printf '%*s' $n '' | tr ' ' '-' | sed 's/-/━/g')" "$C_OFF" "$C_SKIP" "$right$C_OFF"
+}
 
 step() {
   CUR_STEP_NO=$((CUR_STEP_NO + 1))
   CUR_STEP="$1"
   STEP_T0=$(now_ms)
-  out ""
-  out "${C_BOLD}==> Step $CUR_STEP_NO/$TOTAL_STEPS: $1${C_OFF}   [$(ts)]"
-  [ -n "$2" ] && out "    ${C_SKIP}$2${C_OFF}"
+  STEP_TITLE[$CUR_STEP_NO]="$1"; STEP_SECS[$CUR_STEP_NO]="-"
+  plain ""
+  plain "==> Step $CUR_STEP_NO/$TOTAL_STEPS: $1   [$(ts)]"
+  [ -n "$2" ] && plain "    $2"
+  scr ""
+  scr "$(rule "$CUR_STEP_NO/$TOTAL_STEPS  $1" "$(ts)")"
+  [ -n "$2" ] && scr "   ${C_SKIP}$(fit "$2" $((TERM_W - 4)))${C_OFF}"
+  return 0
 }
 step_end() {
   local t1; t1=$(now_ms)
-  out "    ${C_SKIP}-- step $CUR_STEP_NO finished in $(fmt_secs $((t1 - STEP_T0)))${C_OFF}"
+  STEP_SECS[$CUR_STEP_NO]=$(fmt_secs $((t1 - STEP_T0)))
+  plain "    -- step $CUR_STEP_NO finished in ${STEP_SECS[$CUR_STEP_NO]}"
+  scr "   ${C_SKIP}└ step done in ${STEP_SECS[$CUR_STEP_NO]}${C_OFF}"
 }
 
 # check_start : remember when the current check started
@@ -218,14 +279,23 @@ check_start() { CHK_T0=$(now_ms); }
 # record STATUS "name" "detail" ["fix"]
 # STATUS: PASS FAIL WARN SKIP INFO
 record() {
-  local st="$1" name="$2" detail="$3" fix="$4" t1 el col
+  local st="$1" name="$2" detail="$3" fix="$4" t1 el col txt tm dim=""
   t1=$(now_ms); el=$((t1 - ${CHK_T0:-$t1})); CHK_T0=$t1
-  case $st in
-    PASS) col=$C_PASS ;; FAIL) col=$C_FAIL ;; WARN) col=$C_WARN ;; SKIP) col=$C_SKIP ;; *) col=$C_INFO ;;
-  esac
-  out "  [$(ts)] ${col}[$st]${C_OFF} $name${detail:+ - $detail}  ${C_SKIP}($(fmt_secs $el))${C_OFF}"
-  if [ -n "$fix" ]; then
-    printf '%s\n' "$fix" | while IFS= read -r l; do out "              ${C_BOLD}Fix:${C_OFF} $l"; done
+  tm=$(fmt_secs $el)
+  plain "  [$(ts)] [$st] $name${detail:+ - $detail}  ($tm)"
+  [ -n "$fix" ] && printf '%s\n' "$fix" | while IFS= read -r l; do plain "              Fix: $l"; done
+  if [ $PRETTY -eq 1 ]; then
+    col=$(stcol "$st")
+    # the screen line is cut to the terminal width; the log has it all
+    txt=$(fit "$(tilde "$name")${detail:+ · $(tilde "$detail")}" $((TERM_W - 13 - ${#tm})))
+    case $st in SKIP|INFO|PASS) dim=$C_SKIP ;; esac
+    case "$txt" in
+      *" · "*) txt="${txt%%" · "*}${dim:-$C_SKIP} · ${C_OFF}${dim}${txt#*" · "}" ;;
+    esac
+    printf '  %s %s%-4s%s  %s%s  %s%s%s\n' "$(icon "$st")" "$col" "$st" "$C_OFF" "$txt" "$C_OFF" "$C_SKIP" "$tm" "$C_OFF"
+    [ -n "$fix" ] && printf '%s\n' "$fix" | while IFS= read -r l; do
+      printf '           %s↳%s %s\n' "$C_WARN" "$C_OFF" "$l"
+    done
   fi
   R_STATUS[$R_N]=$st; R_STEP[$R_N]=$CUR_STEP_NO; R_NAME[$R_N]="$name"
   R_SECS[$R_N]=$(fmt_secs $el); R_FIX[$R_N]="$fix"
@@ -251,24 +321,48 @@ brew_formula_of() {
   local r; r=$(resolve "$1")
   case "$r" in */Cellar/*) echo "$r" | sed -E 's#.*/Cellar/([^/]+)/.*#\1#' ;; esac
 }
-# py_pip_fix PY "pkg spec..." : pip upgrade fix for interpreters pip may change
+# py_pip_fix PY "pkg spec" [BUNDLE] : pip upgrade fix for an interpreter that
+# pip may change. One fix per real interpreter (symlinks resolved) and spec.
+PYFIX_SEEN=""
 py_pip_fix() {
-  local py="$1" r f; shift
-  if [ -f "$(dirname "$py")/../pyvenv.cfg" ]; then        # virtualenv: pip may always change it
-    add_fix 0 "Upgrade $* in virtualenv $(cd "$(dirname "$py")/.." && pwd)" "\"$py\" -m pip install --disable-pip-version-check --upgrade $*"
+  local py="$1" spec="$2" bundle="$3" r f venv="" key uvb
+  # a virtualenv's python is a symlink to its base interpreter: key on the venv
+  [ -f "$(dirname "$py")/../pyvenv.cfg" ] && venv=$(cd "$(dirname "$py")/.." && pwd -P)
+  if [ -n "$venv" ]; then key="<venv:$venv|$spec>"; else r=$(resolve "$py"); key="<$r|$spec>"; fi
+  case "$PYFIX_SEEN" in *"$key"*) return ;; esac
+  PYFIX_SEEN="$PYFIX_SEEN$key"
+  if [ -n "$venv" ]; then                                  # virtualenv: pip may always change it
+    if ls -d "$venv"/lib/python*/site-packages/pip >/dev/null 2>&1; then
+      add_fix 0 "Upgrade $spec in virtualenv $venv" "\"$py\" -m pip install --disable-pip-version-check --upgrade $spec"
+    else                                                   # uv venvs have no pip
+      case "$spec" in *pip\>*) return ;; esac
+      uvb=$(firstbin $(path_bins uv) "$HOME/.local/bin/uv" "$HOME/.cargo/bin/uv" /opt/homebrew/bin/uv /usr/local/bin/uv)
+      [ -n "$uvb" ] && add_fix 0 "Upgrade $spec in virtualenv $venv (uv)" "\"$uvb\" pip install --python \"$py\" --upgrade $spec"
+    fi
     return
   fi
-  r=$(resolve "$py")
   f=$(brew_formula_of "$py")
-  if [ -n "$f" ]; then add_brew "$f"; return; fi           # Homebrew Python is externally managed
+  if [ -n "$f" ]; then                                     # Homebrew Python is externally managed
+    case "$spec" in
+      *certifi*)
+        case "$(resolve "${bundle:-/nonexistent}")" in
+          */Cellar/python-certifi/*) add_brew python-certifi ;;
+          *) add_fix 0 "Upgrade $spec installed with pip into Homebrew $f" \
+               "\"$py\" -m pip install --disable-pip-version-check --upgrade --break-system-packages $spec" ;;
+        esac ;;
+      *) add_brew "$f" ;;
+    esac
+    return
+  fi
   case "$r" in /usr/bin/*|/Library/Developer/*|/Applications/Xcode*) return ;; esac
-  add_fix 0 "Upgrade $* for $py" "\"$py\" -m pip install --disable-pip-version-check --upgrade $*"
+  add_fix 0 "Upgrade $spec for $py" "\"$py\" -m pip install --disable-pip-version-check --upgrade $spec"
 }
 
 # ---------------------------------------------------------------------------
 # Generic helpers
 # ---------------------------------------------------------------------------
 have() { command -v "$1" >/dev/null 2>&1; }
+firstbin() { local b; for b in "$@"; do [ -x "$b" ] && { echo "$b"; return; }; done; }
 
 # run_to SECONDS cmd... : run with a hard timeout (macOS has no `timeout`).
 run_to() {
@@ -611,19 +705,29 @@ T_START=$(now_ms)
 OS_NAME=$(sw_vers -productName 2>/dev/null || uname -s)
 OS_VER=$(sw_vers -productVersion 2>/dev/null || uname -r)
 OS_BUILD=$(sw_vers -buildVersion 2>/dev/null || echo "-")
-out "${C_BOLD}eMudhra CA compromise - Mac exposure check v$SCRIPT_VERSION${C_OFF}"
-out "Advisory : $ADVISORY"
-out "Started  : $(date '+%Y-%m-%d %H:%M:%S %Z')"
-out "Machine  : $(hostname -s 2>/dev/null) | $OS_NAME $OS_VER ($OS_BUILD) | $(uname -m) | user $(id -un)"
-out "Log file : $LOG"
 if [ $OPT_FIX -eq 1 ]; then
-  out "Mode     : ${C_BOLD}CHECK + FIX${C_OFF} - checks first, then asks before applying automatic fixes, then re-checks."
+  MODE_TXT="CHECK + FIX - checks first, then asks before applying automatic fixes, then re-checks."
 elif [ $OPT_AFTER_FIX -eq 1 ]; then
-  out "Mode     : ${C_BOLD}RE-CHECK after fixes${C_OFF} (read-only)"
+  MODE_TXT="RE-CHECK after fixes (read-only)"
 else
-  out "Mode     : CHECK ONLY (dry-run) - changes nothing on this Mac. Add --fix to apply automatic fixes."
+  MODE_TXT="CHECK ONLY (dry-run) - changes nothing on this Mac. Add --fix to apply automatic fixes."
 fi
-out "Statuses : PASS = safe | FAIL = must fix | WARN = could not decide or needs attention | SKIP = not installed / not run | INFO = for reference"
+plain "eMudhra CA compromise - Mac exposure check v$SCRIPT_VERSION"
+plain "Advisory : $ADVISORY"
+plain "Started  : $(date '+%Y-%m-%d %H:%M:%S %Z')"
+plain "Machine  : $(hostname -s 2>/dev/null) | $OS_NAME $OS_VER ($OS_BUILD) | $(uname -m) | user $(id -un)"
+plain "Log file : $LOG"
+plain "Mode     : $MODE_TXT"
+plain "Statuses : PASS = safe | FAIL = must fix | WARN = could not decide or needs attention | SKIP = not installed / not run | INFO = for reference"
+scr ""
+scr "  ${C_BOLD}🔍 eMudhra CA exposure check${C_OFF}  ${C_SKIP}v${SCRIPT_VERSION%% *} · $ADVISORY${C_OFF}"
+scr ""
+scr "  ${C_SKIP}Machine${C_OFF}  $(hostname -s 2>/dev/null) · $OS_NAME $OS_VER ($OS_BUILD) · $(uname -m) · $(id -un)"
+MODE_MORE=""
+case "$MODE_TXT" in *" - "*) MODE_MORE="${C_SKIP} · ${MODE_TXT#* - }${C_OFF}" ;; esac
+scr "  ${C_SKIP}Mode   ${C_OFF}  ${C_BOLD}${MODE_TXT%% - *}${C_OFF}${MODE_MORE}"
+scr "  ${C_SKIP}Log    ${C_OFF}  $(tilde "$LOG")"
+scr "  ${C_SKIP}Legend ${C_OFF}  ✅ PASS safe   ❌ FAIL must fix   🟡 WARN have a look   ⚪ SKIP not installed   🔵 INFO"
 if [ "$(id -u)" = 0 ]; then
   out "${C_WARN}Note: running as root. Run it as your normal user so it checks your own tools and settings.${C_OFF}"
 fi
@@ -673,6 +777,7 @@ step_end
 # ===========================================================================
 step "macOS system trust" "Safari and native apps use the macOS trust store; Apple blocked the intermediates on 19 Oct 2026."
 check_start
+important=""
 if [ "$(uname -s)" = Darwin ]; then
   if [ -z "$SWU_PID" ]; then
     record SKIP "macOS software updates" "skipped (--quick)"
@@ -752,7 +857,9 @@ for a in "/Applications/Safari.app" "/Applications/Google Chrome.app" "/Applicat
   v=$(defaults read "$a/Contents/Info" CFBundleShortVersionString 2>/dev/null)
   br="$br $(basename "$a" .app) ${v:-?};"
 done
-if [ -n "$br" ]; then
+if [ -n "$br" ] && echo "$important" | grep -qi safari; then
+  record WARN "Browsers" "${br# } - a Safari update is waiting" "Install the Safari update (System Settings > General > Software Update), then restart Safari."
+elif [ -n "$br" ]; then
   record INFO "Browsers" "${br# } (blocked via CRLSets/OneCRL/Apple since 17-19 Oct; just keep them updated and restart)"
 else
   record SKIP "Browsers" "none found in /Applications"
@@ -878,7 +985,7 @@ while IFS= read -r py; do
     croots=$(bundle_roots "$certifi_p")
     if [ $J_STATUS = FAIL ] || [ -n "$croots" ]; then
       fix="\"$py\" -m pip install --upgrade 'certifi>=$FIX_CERTIFI'   (Homebrew Python: brew upgrade python-certifi; also upgrade it in each virtualenv)"
-      py_pip_fix "$py" "'certifi>=$FIX_CERTIFI'"
+      py_pip_fix "$py" "'certifi>=$FIX_CERTIFI'" "$certifi_p"
       if [ $J_STATUS != FAIL ]; then J_STATUS=FAIL; J_DETAIL="bundle still contains: $croots; $J_DETAIL"; fi
     elif ! ver_ge "$certifi_v" "$FIX_CERTIFI"; then
       J_DETAIL="$J_DETAIL; version older than $FIX_CERTIFI but its bundle has no affected roots"
@@ -1066,7 +1173,6 @@ vcheck() {
     elif [ -n "$autocmd" ]; then add_fix 0 "Update $name" "\"$bin\" $autocmd"; fi
   fi
 }
-firstbin() { local b; for b in "$@"; do [ -x "$b" ] && { echo "$b"; return; }; done; }
 
 check_start
 bca=""
@@ -1236,18 +1342,55 @@ else
     if [ -n "$roots" ]; then
       nb_bad=$((nb_bad + 1))
       check_start
+      bst=FAIL; bnote=""
+      # Python environment this file belongs to, and its interpreter (same X.Y)
       envp=$(echo "$f" | sed -E 's#/lib/python[0-9.]+/site-packages/.*##')
-      envpy=""; for c in "$envp/bin/python3" "$envp/bin/python"; do [ -z "$envpy" ] && [ -x "$c" ] && envpy="$c"; done
-      case "$f" in
-        */pip/_vendor/certifi/*) fx="This is pip's vendored copy: upgrade pip in that environment (pip >= $FIX_PIP)."
-          [ -n "$envpy" ] && py_pip_fix "$envpy" "'pip>=$FIX_PIP'" ;;
-        */site-packages/certifi/*)
-          fx="\"$envp/bin/python\" -m pip install --upgrade 'certifi>=$FIX_CERTIFI'   (delete the environment if unused)"
-          [ -n "$envpy" ] && py_pip_fix "$envpy" "'certifi>=$FIX_CERTIFI'" ;;
-        */Cellar/*|*/homebrew/*) fx="brew update && brew upgrade" ;;
-        *) fx="Update the software that ships this file (or ignore if unused)." ;;
-      esac
-      record FAIL "Bundle $f" "contains: $roots" "$fx"
+      pyxy=$(echo "$f" | sed -nE 's#.*/lib/python([0-9]+\.[0-9]+)/site-packages/.*#\1#p')
+      envpy=""
+      if [ -n "$pyxy" ]; then
+        for c in "$envp/bin/python$pyxy" "$envp/bin/python3" "$envp/bin/python"; do
+          [ -z "$envpy" ] && [ -x "$c" ] || continue
+          [ "$("$c" -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null </dev/null)" = "$pyxy" ] && envpy="$c"
+        done
+      fi
+      sp=$(echo "$f" | sed -E 's#(/site-packages)/.*#\1#')
+      if [ -n "$pyxy" ] && [ -z "$envpy" ]; then
+        bst=WARN
+        if [ -f "$envp/pyvenv.cfg" ]; then
+          bnote="; virtualenv whose Python $pyxy no longer runs"
+          fx="Recreate this virtualenv ($envp), or delete it if unused."
+        else
+          bnote="; leftover: no Python $pyxy is installed there"
+          fx="Leftover from a removed Python $pyxy. Delete $sp if nothing uses it."
+        fi
+      else
+        case "$f" in
+          */pip/_vendor/certifi/*) fx="This is pip's vendored copy: upgrade pip in that environment (pip >= $FIX_PIP)."
+            [ -n "$envpy" ] && py_pip_fix "$envpy" "'pip>=$FIX_PIP'" "$f" ;;
+          */site-packages/certifi/*)
+            if [ -d "$sp/pip" ]; then
+              fx="\"${envpy:-$envp/bin/python}\" -m pip install --upgrade 'certifi>=$FIX_CERTIFI'   (delete the environment if unused)"
+            else
+              fx="uv pip install --python \"${envpy:-$envp/bin/python}\" --upgrade 'certifi>=$FIX_CERTIFI'   (no pip in this environment; delete it if unused)"
+            fi
+            [ -n "$envpy" ] && py_pip_fix "$envpy" "'certifi>=$FIX_CERTIFI'" "$f" ;;
+          */botocore/cacert.pem)
+            if [ -d "$sp/certifi" ]; then
+              bst=WARN; bnote="; botocore's fallback copy, not used while certifi is installed here"
+              fx="Keep certifi up to date in this environment; upgrade botocore/boto3 when AWS ships a new bundle."
+            else
+              fx="botocore's own copy (AWS CLI / boto3). Update the AWS CLI (official installer or brew upgrade awscli), or pip install certifi into this environment so botocore uses it."
+            fi ;;
+          */etc/ca-certificates/cert.pem) fx="brew update && brew upgrade ca-certificates"; add_brew ca-certificates ;;
+          */etc/openssl/cert.pem) bst=WARN; bnote="; leftover from the old Homebrew openssl (1.0)"
+            fx="Delete this file if nothing uses it (current Homebrew OpenSSL uses etc/openssl@3)." ;;
+          */Cellar/*) fm=$(echo "$f" | sed -E 's#.*/Cellar/([^/]+)/.*#\1#')
+            fx="Part of Homebrew $fm: brew upgrade $fm (or brew uninstall $fm if unused)." ;;
+          */homebrew/*) fx="brew update && brew upgrade" ;;
+          *) fx="Update the software that ships this file (or ignore if unused)." ;;
+        esac
+      fi
+      record $bst "Bundle $f" "contains: $roots$bnote" "$fx"
     else
       nb_clean=$((nb_clean + 1))
       logonly "              clean bundle: $f"
@@ -1259,7 +1402,7 @@ else
   elif [ $nb_bad -eq 0 ]; then
     record PASS "CA bundle scan" "$nb_total bundle(s) checked, none contain the affected roots (list in log)"
   else
-    record INFO "CA bundle scan" "$nb_total bundle(s) checked: $nb_bad still contain affected roots (FAIL lines above), $nb_clean clean"
+    record INFO "CA bundle scan" "$nb_total bundle(s) checked: $nb_bad still contain affected roots (FAIL/WARN lines above), $nb_clean clean"
   fi
 fi
 step_end
@@ -1294,7 +1437,7 @@ else
     done
     docker rm -f "$cid" >/dev/null 2>&1 </dev/null
     if [ -z "$got" ]; then
-      record WARN "image $iname" "no system CA bundle found (scratch/custom image?)" "Check how this image's app verifies TLS."
+      record INFO "image $iname" "no system CA bundle in this image (ca-certificates not installed), so there is no OS trust store to fix; app-level bundles are not checked"
       continue
     fi
     roots=$(bundle_roots "$TMP/img.pem")
@@ -1344,67 +1487,141 @@ while [ $i -lt $R_N ]; do
   case ${R_STATUS[$i]} in PASS) n_pass=$((n_pass+1));; FAIL) n_fail=$((n_fail+1));; WARN) n_warn=$((n_warn+1));; SKIP) n_skip=$((n_skip+1));; esac
   i=$((i + 1))
 done
-out ""
-out "${C_BOLD}================================ SUMMARY ================================${C_OFF}"
-out "Finished : $(date '+%Y-%m-%d %H:%M:%S %Z') (total $(fmt_secs $((T_END - T_START))))"
-out "Results  : ${C_PASS}$n_pass PASS${C_OFF}, ${C_FAIL}$n_fail FAIL${C_OFF}, ${C_WARN}$n_warn WARN${C_OFF}, $n_skip SKIP"
-out ""
-out "$(printf '%-4s %-6s %-5s %-8s %s' '#' 'STATUS' 'STEP' 'TIME' 'CHECK')"
+T_TOTAL=$(fmt_secs $((T_END - T_START)))
+# Plain summary (log; terminal too when not pretty)
+plain ""
+plain "================================ SUMMARY ================================"
+plain "Finished : $(date '+%Y-%m-%d %H:%M:%S %Z') (total $T_TOTAL)"
+plain "Results  : $n_pass PASS, $n_fail FAIL, $n_warn WARN, $n_skip SKIP"
+plain ""
+plain "$(printf '%-4s %-6s %-5s %-8s %s' '#' 'STATUS' 'STEP' 'TIME' 'CHECK')"
 i=0
 while [ $i -lt $R_N ]; do
-  st=${R_STATUS[$i]}
-  case $st in PASS) col=$C_PASS;; FAIL) col=$C_FAIL;; WARN) col=$C_WARN;; SKIP) col=$C_SKIP;; *) col=$C_INFO;; esac
-  out "$(printf '%-4s %s%-6s%s %-5s %-8s %s' $((i + 1)) "$col" "$st" "$C_OFF" "${R_STEP[$i]}" "${R_SECS[$i]}" "${R_NAME[$i]}")"
+  plain "$(printf '%-4s %-6s %-5s %-8s %s' $((i + 1)) "${R_STATUS[$i]}" "${R_STEP[$i]}" "${R_SECS[$i]}" "${R_NAME[$i]}")"
   i=$((i + 1))
 done
 if [ $n_fail -gt 0 ] || [ $n_warn -gt 0 ]; then
-  out ""
-  out "${C_BOLD}What to do:${C_OFF}"
+  plain ""
+  plain "What to do:"
   i=0
   while [ $i -lt $R_N ]; do
     st=${R_STATUS[$i]}
     if { [ "$st" = FAIL ] || [ "$st" = WARN ]; } && [ -n "${R_FIX[$i]}" ]; then
-      out "  [$st] #$((i + 1)) ${R_NAME[$i]}"
-      printf '%s\n' "${R_FIX[$i]}" | while IFS= read -r l; do out "        $l"; done
+      plain "  [$st] #$((i + 1)) ${R_NAME[$i]}"
+      printf '%s\n' "${R_FIX[$i]}" | while IFS= read -r l; do plain "        $l"; done
     fi
     i=$((i + 1))
   done
-  out ""
-  out "After fixing, restart the affected apps/terminals and run this script again."
+  plain ""
+  plain "After fixing, restart the affected apps/terminals and run this script again."
 fi
-out ""
+plain ""
 if [ $n_fail -gt 0 ]; then
-  out "${C_FAIL}RESULT: NOT OK - $n_fail item(s) still trust the compromised eMudhra intermediates or need updates.${C_OFF}"
+  plain "RESULT: NOT OK - $n_fail item(s) still trust the compromised eMudhra intermediates or need updates."
+elif [ $n_warn -gt 0 ]; then
+  plain "RESULT: OK - no FAIL found. Review the $n_warn WARN item(s) above."
 else
-  if [ $n_warn -gt 0 ]; then
-    out "${C_PASS}RESULT: OK - no FAIL found.${C_OFF} Review the $n_warn WARN item(s) above."
+  plain "RESULT: OK - no FAIL found."
+fi
+
+# Pretty summary (terminal): one row per step, then the fixes grouped
+if [ $PRETTY -eq 1 ]; then
+  cnt() { # cnt N COLOR : right-aligned count, a dim dot for zero
+    if [ "$1" -eq 0 ]; then printf '%s   ·%s' "$C_SKIP" "$C_OFF"; else printf '%s%4s%s' "$2" "$1" "$C_OFF"; fi
+  }
+  scr ""
+  scr "$(rule "SUMMARY" "total $T_TOTAL")"
+  scr "$(printf '   %-40s  ✅  ❌  🟡  ⚪  %7s' 'Step' 'Time')"
+  sn=1
+  while [ $sn -le $CUR_STEP_NO ]; do
+    a=0; b=0; c=0; d=0; i=0
+    while [ $i -lt $R_N ]; do
+      if [ "${R_STEP[$i]}" = $sn ]; then
+        case ${R_STATUS[$i]} in PASS) a=$((a+1));; FAIL) b=$((b+1));; WARN) c=$((c+1));; SKIP) d=$((d+1));; esac
+      fi
+      i=$((i + 1))
+    done
+    scr "$(printf '   %2s %s %s%s%s%s  %s%7s%s' $sn "$(padr "$(fit "${STEP_TITLE[$sn]}" 37)" 37)" "$(cnt $a "$C_PASS")" "$(cnt $b "$C_FAIL")" "$(cnt $c "$C_WARN")" "$(cnt $d "$C_SKIP")" "$C_SKIP" "${STEP_SECS[$sn]}" "$C_OFF")"
+    sn=$((sn + 1))
+  done
+  scr "   $(printf '%-40s' '')$(printf '%s' '──────────────────')"
+  scr "$(printf '   %-40s%s%s%s%s  %s%7s%s' 'Total' "$(cnt $n_pass "$C_PASS")" "$(cnt $n_fail "$C_FAIL")" "$(cnt $n_warn "$C_WARN")" "$(cnt $n_skip "$C_SKIP")" "$C_BOLD" "$T_TOTAL" "$C_OFF")"
+
+  if [ $n_fail -gt 0 ] || [ $n_warn -gt 0 ]; then
+    scr ""
+    scr "$(rule "WHAT TO DO" "same fix = one line")"
+    # Group the checks that share the same fix text: FAIL groups first, then WARN.
+    R_DONE=(); k=0
+    for want in FAIL WARN; do
+      i=0
+      while [ $i -lt $R_N ]; do
+        if [ "${R_STATUS[$i]}" = $want ] && [ -n "${R_FIX[$i]}" ] && [ -z "${R_DONE[$i]}" ]; then
+          k=$((k + 1)); names=""; nn=0; j=$i
+          while [ $j -lt $R_N ]; do
+            if [ -z "${R_DONE[$j]}" ] && [ "${R_STATUS[$j]}" = $want ] && [ "${R_FIX[$j]}" = "${R_FIX[$i]}" ]; then
+              R_DONE[$j]=1; nn=$((nn + 1)); names="$names${names:+, }$(tilde "${R_NAME[$j]}")"
+            fi
+            j=$((j + 1))
+          done
+          first=1
+          printf '%s\n' "${R_FIX[$i]}" | while IFS= read -r l; do
+            if [ $first = 1 ]; then printf '  %s %s%2d.%s %s\n' "$(icon $want)" "$C_BOLD" $k "$C_OFF" "$l"; first=0
+            else printf '         %s\n' "$l"; fi
+          done
+          if [ $nn -gt 1 ]; then
+            scr "        ${C_SKIP}$(fit "$nn checks: $names" $((TERM_W - 9)))${C_OFF}"
+          else
+            scr "        ${C_SKIP}$(fit "$names" $((TERM_W - 9)))${C_OFF}"
+          fi
+        fi
+        i=$((i + 1))
+      done
+    done
+    scr "  ${C_SKIP}After fixing, restart the affected apps/terminals and run this script again.${C_OFF}"
+  fi
+  scr ""
+  if [ $n_fail -gt 0 ]; then
+    scr "  ❌ ${C_FAIL}RESULT: NOT OK${C_OFF}  $n_fail item(s) still trust the compromised eMudhra intermediates or need updates."
+  elif [ $n_warn -gt 0 ]; then
+    scr "  ✅ ${C_PASS}${C_BOLD}RESULT: OK${C_OFF}  no FAIL found. Have a look at the $n_warn WARN item(s)."
   else
-    out "${C_PASS}RESULT: OK - no FAIL found.${C_OFF}"
+    scr "  ✅ ${C_PASS}${C_BOLD}RESULT: OK${C_OFF}  no FAIL found."
   fi
 fi
 
 # Brew upgrades are one fix (run as you, never as root)
 if [ -n "$BREW_FORMULAS" ] && [ -n "$BREW_PREFIXES" ]; then
   bb=""; for p in $BREW_PREFIXES; do [ -z "$bb" ] && bb="$p/bin/brew"; done
-  add_fix 0 "Homebrew: brew update && brew upgrade$BREW_FORMULAS" "HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK=1 \"$bb\" update && HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK=1 \"$bb\" upgrade$BREW_FORMULAS"
+  # One formula at a time: a disabled or failing formula does not stop the others.
+  add_fix 0 "Homebrew: brew update && brew upgrade$BREW_FORMULAS" "export HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK=1 HOMEBREW_NO_AUTO_UPDATE=1; \"$bb\" update; rc=0; for f in$BREW_FORMULAS; do if \"$bb\" info --json=v2 \"\$f\" 2>/dev/null | grep -q '\"disabled\": *true'; then echo \"skipped \$f: disabled in Homebrew, uninstall it if unused\"; continue; fi; echo \"== brew upgrade \$f\"; \"$bb\" upgrade \"\$f\" || { echo \"FAILED: brew upgrade \$f\"; rc=1; }; done; exit \$rc"
 fi
 
 if [ $FX_N -gt 0 ] && [ $OPT_FIX -eq 0 ]; then
-  out ""
-  out "${C_BOLD}$FX_N fix(es) can be applied automatically.${C_OFF} Run again with --fix to apply them (you will be asked first):"
-  out "  curl -fsSL https://raw.githubusercontent.com/wakumo/emudhra-check/main/emudhra-check.sh | bash -s -- --fix"
-  out "  (or: bash emudhra-check.sh --fix)"
+  plain ""
+  plain "$FX_N fix(es) can be applied automatically. Run again with --fix to apply them (you will be asked first):"
+  plain "  curl -fsSL https://raw.githubusercontent.com/wakumo/emudhra-check/main/emudhra-check.sh | bash -s -- --fix"
+  plain "  (or: bash emudhra-check.sh --fix)"
+  scr ""
+  scr "$(rule "AUTO-FIX AVAILABLE" "$FX_N fix(es)")"
   i=0; while [ $i -lt $FX_N ]; do
     sfx=""; [ "${FX_SUDO[$i]}" = 1 ] && sfx=" [admin password]"
-    out "    - ${FX_LABEL[$i]}$sfx"; i=$((i + 1))
+    plain "    - ${FX_LABEL[$i]}$sfx"
+    w=$((TERM_W - 7)); [ -n "$sfx" ] && w=$((w - 18))
+    scr "   🔧 $(fitm "$(tilde "${FX_LABEL[$i]}")" $w)${sfx:+ ${C_WARN}🔑 admin password${C_OFF}}"
+    i=$((i + 1))
   done
+  scr ""
+  scr "  Apply them (you will be asked first):"
+  scr "  ${C_BOLD}curl -fsSL https://raw.githubusercontent.com/wakumo/emudhra-check/main/emudhra-check.sh | bash -s -- --fix${C_OFF}"
 fi
 
 if [ $OPT_FIX -eq 1 ]; then
   apply_fixes
 fi
 
-out "Full log (send this file if asked): $LOG"
+plain "Full log (send this file if asked): $LOG"
+scr ""
+scr "  📄 Full log (send this file if asked): $(tilde "$LOG")"
 [ $n_fail -gt 0 ] && return 1
 return 0
 }
@@ -1412,10 +1629,23 @@ return 0
 # ---------------------------------------------------------------------------
 # apply_fixes : confirm, run the registered fixes, ask for a re-check
 # ---------------------------------------------------------------------------
+# fixline STATUS "label" "time" : one progress line of the auto-fix
+fixline() {
+  local st=$1 lbl="$2" tm="$3" tag
+  case $st in RUN) tag="...." ;; *) tag=$st ;; esac
+  plain "  [$(ts)] [$tag] $lbl${tm:+  ($tm)}"
+  [ $PRETTY -eq 1 ] || return 0
+  # the "running" line is replaced in place by its result line
+  [ $st = RUN ] || printf '\r\033[K'
+  printf '  %s %s%-6s%s %s%s' "$(icon "$st")" "$(stcol "$st")" "$st" "$C_OFF" "$(tilde "$lbl")" "${tm:+  $C_SKIP$tm$C_OFF}"
+  [ $st = RUN ] || printf '\n'
+}
 apply_fixes() {
   local i ans need_sudo=0 sudo_ok=0 t0 t1 rc outf n_ok=0 n_bad=0 n_skip=0
-  out ""
-  out "${C_BOLD}================================ AUTO-FIX ===============================${C_OFF}"
+  plain ""
+  plain "================================ AUTO-FIX ==============================="
+  scr ""
+  scr "$(rule "AUTO-FIX")"
   if [ $FX_N -eq 0 ]; then
     out "Nothing can be fixed automatically. Follow the 'What to do' list above."
     return 0
@@ -1423,7 +1653,8 @@ apply_fixes() {
   out "The following $FX_N fix(es) will be applied:"
   i=0; while [ $i -lt $FX_N ]; do
     [ "${FX_SUDO[$i]}" = 1 ] && need_sudo=1
-    out "  $((i + 1)). ${FX_LABEL[$i]}$([ "${FX_SUDO[$i]}" = 1 ] && echo ' [admin password]')"
+    plain "  $((i + 1)). ${FX_LABEL[$i]}$([ "${FX_SUDO[$i]}" = 1 ] && echo ' [admin password]')"
+    scr "  ${C_BOLD}$(printf '%2d' $((i + 1))).${C_OFF} $(tilde "${FX_LABEL[$i]}")$([ "${FX_SUDO[$i]}" = 1 ] && echo " ${C_WARN}🔑 admin password${C_OFF}")"
     logonly "       command: ${FX_CMD[$i]}"
     i=$((i + 1))
   done
@@ -1450,10 +1681,10 @@ apply_fixes() {
     t0=$(now_ms); outf="$TMP/fix.$i"
     if [ "${FX_SUDO[$i]}" = 1 ] && [ $sudo_ok -eq 0 ]; then
       n_skip=$((n_skip + 1))
-      out "  [$(ts)] ${C_SKIP}[SKIP]${C_OFF} ${FX_LABEL[$i]} - needs admin password"
+      fixline SKIP "${FX_LABEL[$i]} - needs admin password" ""
       i=$((i + 1)); continue
     fi
-    out "  [$(ts)] ${C_INFO}[....]${C_OFF} ${FX_LABEL[$i]}"
+    fixline RUN "${FX_LABEL[$i]}" ""
     if [ "${FX_SUDO[$i]}" = 1 ] && [ "$(id -u)" != 0 ]; then
       sudo /bin/bash -c "${FX_CMD[$i]}" > "$outf" 2>&1 </dev/null; rc=$?
     elif echo "${FX_CMD[$i]}" | grep -q '/bin/brew"' && [ "$(id -u)" = 0 ]; then
@@ -1465,15 +1696,16 @@ apply_fixes() {
     sed 's/^/       | /' "$outf" >> "$LOG"
     if [ $rc -eq 0 ]; then
       n_ok=$((n_ok + 1))
-      out "  [$(ts)] ${C_PASS}[DONE]${C_OFF} ${FX_LABEL[$i]}  ${C_SKIP}($(fmt_secs $((t1 - t0))))${C_OFF}"
+      fixline DONE "${FX_LABEL[$i]}" "$(fmt_secs $((t1 - t0)))"
     else
       n_bad=$((n_bad + 1))
-      out "  [$(ts)] ${C_FAIL}[FAILED]${C_OFF} ${FX_LABEL[$i]} (exit $rc)  ${C_SKIP}($(fmt_secs $((t1 - t0))))${C_OFF}"
-      tail -3 "$outf" | while IFS= read -r l; do out "           | $l"; done
+      fixline FAILED "${FX_LABEL[$i]} (exit $rc)" "$(fmt_secs $((t1 - t0)))"
+      tail -3 "$outf" | while IFS= read -r l; do out "           ${C_SKIP}| $l${C_OFF}"; done
     fi
     i=$((i + 1))
   done
-  out "Auto-fix finished: $n_ok done, $n_bad failed, $n_skip skipped."
+  plain "Auto-fix finished: $n_ok done, $n_bad failed, $n_skip skipped."
+  scr "  Auto-fix finished: ${C_PASS}$n_ok done${C_OFF}, ${C_FAIL}$n_bad failed${C_OFF}, $n_skip skipped."
   EMD_RERUN=1
 }
 

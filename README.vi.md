@@ -1,6 +1,6 @@
 # emudhra-check
 
-[English](README.md) | **Tiếng Việt**
+[English](README.md) | **Tiếng Việt** | [日本語](README.ja.md)
 
 Chỉ cần chạy một lệnh để biết máy Mac của bạn còn tin các CA **eMudhra** đã bị lộ khoá hay không. Script cũng cho biết chính xác cần cập nhật những gì.
 
@@ -92,7 +92,7 @@ Với những thứ không thể kiểm tra trực tiếp, script đọc phiên 
 | 8 | **Công cụ khác** | Phiên bản của Homebrew `ca-certificates` (và các file `cert.pem` của nó), uv, pixi, rustup, deno, mise, bun, Go, Claude Code và Perl Mozilla::CA. | Lệnh nâng cấp được in ra cho từng công cụ. |
 | 9 | **App Electron** | Với mỗi app trong /Applications xây trên Electron (Slack, VS Code, Discord, Notion, Postman…): phiên bản Electron của nó. Đã vá: 42.11.16, 43.8.1, 44.9.1 trở lên. | Cập nhật app. Nếu đã là bản mới nhất thì hãng chưa ra bản sửa; kiểm tra lại sau. |
 | 10 | **Thiết lập TLS** | Các thiết lập tắt kiểm tra chứng chỉ (`NODE_TLS_REJECT_UNAUTHORIZED=0`, `PYTHONHTTPSVERIFY=0`, `GIT_SSL_NO_VERIFY`, `insecure` trong `~/.curlrc`, `strict-ssl=false` trong `~/.npmrc`, `sslVerify=false` trong `~/.gitconfig`, `trusted-host` của pip). File CA tuỳ chỉnh đặt qua `SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE`, `CURL_CA_BUNDLE`, `NODE_EXTRA_CA_CERTS`, `GIT_SSL_CAINFO`, `PIP_CERT`, git `http.sslCAInfo` hoặc npm `cafile`. | Gỡ thiết lập, hoặc thay file CA cũ. |
-| 11 | **File CA trên đĩa** | Tìm trong thư mục home, Homebrew, Python của python.org và conda các file CA bundle (`cacert.pem`, `cert.pem`, `ca-bundle.crt`…). Mỗi file được kiểm tra xem còn các root bị ảnh hưởng không. Bước này tìm ra các bản `certifi` cũ trong virtualenv và các bản sao đóng gói kèm. Bỏ qua `~/Library`, cache và `node_modules` (thêm `--deep` để quét cả `node_modules`). | Nâng `certifi`/pip trong virtualenv đó, hoặc xoá môi trường nếu không dùng nữa. |
+| 11 | **File CA trên đĩa** | Tìm trong thư mục home, Homebrew, Python của python.org và conda các file CA bundle (`cacert.pem`, `cert.pem`, `ca-bundle.crt`…). Mỗi file được kiểm tra xem còn các root bị ảnh hưởng không. Bước này tìm ra các bản `certifi` cũ trong virtualenv và các bản sao đóng gói kèm. Bỏ qua `~/Library`, cache và `node_modules` (thêm `--deep` để quét cả `node_modules`). | Nâng `certifi`/pip trong virtualenv đó, hoặc xoá môi trường nếu không dùng nữa. File còn sót lại từ một bản Python đã gỡ được báo WARN: xoá đi nếu không còn gì dùng. |
 | 12 | **Docker image** | Nếu Docker đang chạy: đọc CA bundle hệ thống bên trong mỗi image trên máy mà không chạy image. | Build lại trên base image đã cập nhật (`apt-get`/`apk`/`dnf upgrade ca-certificates`), rồi push và deploy lại. Cập nhật Mac không cập nhật container. |
 | 13 | **Domain của bạn** | Chỉ khi có `--domain`: tải chuỗi chứng chỉ server của bạn trả về và kiểm tra nó không dùng CA trung gian eMudhra bị ảnh hưởng. | Thay chứng chỉ. |
 
@@ -100,34 +100,35 @@ Với những thứ không thể kiểm tra trực tiếp, script đọc phiên 
 
 ## Đọc kết quả
 
-Mỗi mục kiểm tra in ra một dòng: thời gian, trạng thái, tên mục, chi tiết và thời gian kiểm tra. Dòng **Fix:** đi kèm khi bạn cần xử lý.
+Mỗi mục kiểm tra in ra một dòng: icon và trạng thái, tên mục, chi tiết và thời gian kiểm tra. Dòng `↳` đi kèm ghi cách sửa khi bạn cần xử lý. Trên màn hình, dòng dài được rút gọn cho vừa cửa sổ; file log luôn có đầy đủ nội dung.
 
 ```
-==> Step 3/13: curl   [10:42:05]
-    Each curl binary must reject all 12 test chains.
-  [10:42:07] [FAIL] curl /usr/bin/curl (8.7.1 LibreSSL/3.3.6) - TRUSTS 6/12 compromised test chains: dv-g3b-emudhra ov-g3b-emudhra ...  (1.9s)
-              Fix: Apply the /etc/ssl/cert.pem fix from step 2 (macOS updates do not update that file).
-  [10:42:09] [PASS] curl /opt/homebrew/opt/curl/bin/curl (8.10.1 OpenSSL/3.4.0) - rejected 12/12 test chains; normal site github.com OK  (1.7s)
-    -- step 3 finished in 3.6s
+━━ 3/13  curl ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 10:42:05
+   Each curl binary must reject all 12 test chains.
+  ❌ FAIL  curl /usr/bin/curl (8.7.1 LibreSSL/3.3.6) · TRUSTS 6/12 compromised test chai…  1.9s
+           ↳ Apply the /etc/ssl/cert.pem fix from step 2 (macOS updates do not update that file).
+  ✅ PASS  curl /opt/homebrew/opt/curl/bin/curl (8.10.1 OpenSSL/3.4.0) · rejected 12/12 …  1.7s
+   └ step done in 3.6s
 ```
 
 *(Ví dụ minh hoạ. Kết quả của script luôn bằng tiếng Anh.)*
 
 | Trạng thái | Ý nghĩa |
 |---|---|
-| `PASS` | An toàn. |
-| `FAIL` | **Phải sửa.** Chương trình này vẫn tin các CA bị lộ, hoặc là phiên bản chưa có bản vá. |
-| `WARN` | Script không kết luận được (ví dụ không có mạng tới server thử nghiệm), hoặc có gì đó cần xem. Đọc phần chi tiết. |
-| `SKIP` | Không cài hoặc không áp dụng. Không cần làm gì. |
-| `INFO` | Chỉ để tham khảo. |
+| ✅ `PASS` | An toàn. |
+| ❌ `FAIL` | **Phải sửa.** Chương trình này vẫn tin các CA bị lộ, hoặc là phiên bản chưa có bản vá. |
+| 🟡 `WARN` | Script không kết luận được (ví dụ không có mạng tới server thử nghiệm), hoặc có gì đó cần xem. Đọc phần chi tiết. |
+| ⚪ `SKIP` | Không cài hoặc không áp dụng. Không cần làm gì. |
+| 🔵 `INFO` | Chỉ để tham khảo. |
 
 Cuối cùng bạn nhận được:
 
-- **bảng tổng kết** liệt kê mọi mục kiểm tra, trạng thái và thời gian;
-- danh sách **What to do** chỉ gồm các mục bạn cần xử lý;
-- `RESULT: OK` hoặc `RESULT: NOT OK`, kèm đường dẫn file log.
+- **bảng tổng kết** mỗi bước một dòng: bao nhiêu mục ✅ / ❌ / 🟡 / ⚪ và bước đó mất bao lâu;
+- danh sách **What to do** chỉ gồm những gì bạn cần xử lý. Các mục cùng một cách sửa được gộp chung một dòng;
+- `RESULT: OK` hoặc `RESULT: NOT OK`;
+- danh sách những gì `--fix` có thể tự sửa, và đường dẫn file log.
 
-File log chi tiết hơn màn hình, ví dụ kết quả với từng server trong 12 server thử nghiệm. Gửi cho IT khi được yêu cầu.
+File log là văn bản thuần, mỗi mục kiểm tra một dòng (`[PASS]`, `[FAIL]`…), có đầy đủ chi tiết và kết quả với từng server trong 12 server thử nghiệm. Gửi cho IT khi được yêu cầu. Khi dùng `--no-color`, hoặc khi output không phải terminal, màn hình hiện đúng định dạng thuần như file log.
 
 ---
 
@@ -138,17 +139,17 @@ curl -fsSL https://raw.githubusercontent.com/wakumo/emudhra-check/main/emudhra-c
 ```
 
 1. Chạy toàn bộ các bước kiểm tra trước, giống chế độ kiểm tra.
-2. Script liệt kê mọi bản sửa nó áp dụng được. Bản sửa cần mật khẩu admin được đánh dấu `[admin password]`.
+2. Script liệt kê mọi bản sửa nó áp dụng được. Bản sửa cần mật khẩu admin được đánh dấu 🔑 `admin password`.
 3. Script hỏi `Apply these fixes now? [y/N]`. Không có gì thay đổi nếu bạn không trả lời `y`.
-4. Nó áp dụng từng bản sửa và in `[DONE]`, `[FAILED]` hoặc `[SKIP]` kèm thời gian. Toàn bộ output của lệnh được ghi vào log.
+4. Nó áp dụng từng bản sửa và in ✅ `DONE`, ❌ `FAILED` hoặc ⚪ `SKIP` kèm thời gian. Toàn bộ output của lệnh được ghi vào log.
 5. Nó **chạy lại toàn bộ kiểm tra** và lưu kết quả vào `...-after-fix.log`, để bạn thấy những gì đã được sửa.
 
 | Vấn đề | Cách tự sửa | Cần mật khẩu |
 |---|---|---|
 | `/etc/ssl/cert.pem` còn các root bị ảnh hưởng (curl/git/python3 của Apple) | Cách xử lý tạm của advisory: gỡ 2 root. Bản gốc được giữ ở `/etc/ssl/cert.pem.pre-emudhra`. | có |
 | pip có sẵn của Apple tin các server thử nghiệm | Bản sửa `sitecustomize.py` của advisory (`PIP_CERT=/etc/ssl/cert.pem`) | có |
-| Homebrew ca-certificates / curl / git / node / python / uv / mise đã cũ | Một lệnh `brew update && brew upgrade <các formula đó>`, chạy dưới quyền bạn | không |
-| certifi hoặc pip cũ trong virtualenv, pyenv, conda hoặc Python của python.org | `python -m pip install --upgrade 'certifi>=2026.10.19'` / `'pip>=26.2.2'` | không |
+| Homebrew ca-certificates / curl / git / node / python / uv / mise đã cũ | `brew update`, rồi `brew upgrade` từng formula, chạy dưới quyền bạn. Formula nào lỗi, hoặc bị Homebrew ngừng hỗ trợ (ví dụ `python@3.8`), không làm dừng các formula khác. | không |
+| certifi hoặc pip cũ trong virtualenv, pyenv, conda hoặc Python của python.org | `python -m pip install --upgrade 'certifi>=2026.10.19'` / `'pip>=26.2.2'`. Với virtualenv tạo bằng uv (không có pip): `uv pip install`. Với certifi cài bằng pip vào Python của Homebrew: thêm `--break-system-packages`. | không |
 | Python của python.org không kiểm tra được site nào | Chạy `Install Certificates.command` của nó | không |
 | Java tin các server thử nghiệm | Thêm 16 fingerprint bị lộ vào `blocked.certs` / `blacklisted.certs` của JDK. Bản gốc được giữ ở `*.pre-emudhra`. | nếu JDK cài cho toàn hệ thống |
 | uv, pixi, rustup, deno, mise, Claude Code đã cũ | Lệnh tự cập nhật của chính chúng | không |
@@ -190,7 +191,7 @@ curl -fsSL https://raw.githubusercontent.com/wakumo/emudhra-check/main/emudhra-c
 | `--deep` | Quét cả thư mục `node_modules` (chậm hơn). |
 | `--domain a.com,b.com` | Kiểm tra thêm chứng chỉ mà domain của bạn trả về (bước 13). |
 | `--log FILE` | Lưu log vào `FILE` thay vì Desktop. |
-| `--no-color` | Output không màu. |
+| `--no-color` | Output thuần, không màu và không icon. |
 | `--help` | Hiện hướng dẫn. |
 
 Mã thoát: `0` = không có FAIL, `1` = có ít nhất một FAIL. Có thể dùng trong script hoặc MDM.

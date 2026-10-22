@@ -1,6 +1,6 @@
 # emudhra-check
 
-**English** | [Tiếng Việt](README.vi.md)
+**English** | [Tiếng Việt](README.vi.md) | [日本語](README.ja.md)
 
 A one-command check that tells you whether your Mac still trusts the compromised **eMudhra** certificate authorities. It also tells you exactly what to update.
 
@@ -92,7 +92,7 @@ For things that cannot be tested live, the script reads the version or the certi
 | 8 | **Other tools** | Versions of Homebrew `ca-certificates` (and its `cert.pem` files), uv, pixi, rustup, deno, mise, bun, Go, Claude Code and Perl Mozilla::CA. | The upgrade command is printed for each tool. |
 | 9 | **Electron apps** | For every app in /Applications built on Electron (Slack, VS Code, Discord, Notion, Postman…): its Electron version. Patched: 42.11.16, 43.8.1, 44.9.1 or newer. | Update the app. If you already have the latest version, the vendor has not shipped a fix yet; check again later. |
 | 10 | **TLS settings** | Settings that switch verification off (`NODE_TLS_REJECT_UNAUTHORIZED=0`, `PYTHONHTTPSVERIFY=0`, `GIT_SSL_NO_VERIFY`, `insecure` in `~/.curlrc`, `strict-ssl=false` in `~/.npmrc`, `sslVerify=false` in `~/.gitconfig`, pip `trusted-host`). Custom CA files set by `SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE`, `CURL_CA_BUNDLE`, `NODE_EXTRA_CA_CERTS`, `GIT_SSL_CAINFO`, `PIP_CERT`, git `http.sslCAInfo` or npm `cafile`. | Remove the setting, or replace the old CA file. |
-| 11 | **CA files on disk** | Searches your home folder, Homebrew, python.org Python and conda for CA bundle files (`cacert.pem`, `cert.pem`, `ca-bundle.crt`…). Each file is checked for the affected roots. This finds old `certifi` copies in virtualenvs and vendored copies. It skips `~/Library`, caches and `node_modules` (add `--deep` to include `node_modules`). | Upgrade `certifi`/pip in that virtualenv, or delete the environment if it is unused. |
+| 11 | **CA files on disk** | Searches your home folder, Homebrew, python.org Python and conda for CA bundle files (`cacert.pem`, `cert.pem`, `ca-bundle.crt`…). Each file is checked for the affected roots. This finds old `certifi` copies in virtualenvs and vendored copies. It skips `~/Library`, caches and `node_modules` (add `--deep` to include `node_modules`). | Upgrade `certifi`/pip in that virtualenv, or delete the environment if it is unused. Files left over from a Python that is no longer installed are shown as WARN: delete them if nothing uses them. |
 | 12 | **Docker images** | If Docker is running: the system CA bundle inside each local image is read without running the image. | Rebuild on an updated base image (`apt-get`/`apk`/`dnf upgrade ca-certificates`), then push and redeploy. Updating the Mac does not update containers. |
 | 13 | **Your domains** | Only with `--domain`: downloads the certificate chain your servers send and checks that it does not use an affected eMudhra intermediate. | Replace the certificate. |
 
@@ -100,34 +100,35 @@ For things that cannot be tested live, the script reads the version or the certi
 
 ## Reading the output
 
-Every check prints one line: the time, the status, the item, the detail and how long the check took. A **Fix:** line follows when you need to act.
+Every check prints one line: an icon and the status, the item, the detail and how long the check took. A `↳` line follows with the fix when you need to act. On screen, long lines are shortened to fit the window; the log file always has the full text.
 
 ```
-==> Step 3/13: curl   [10:42:05]
-    Each curl binary must reject all 12 test chains.
-  [10:42:07] [FAIL] curl /usr/bin/curl (8.7.1 LibreSSL/3.3.6) - TRUSTS 6/12 compromised test chains: dv-g3b-emudhra ov-g3b-emudhra ...  (1.9s)
-              Fix: Apply the /etc/ssl/cert.pem fix from step 2 (macOS updates do not update that file).
-  [10:42:09] [PASS] curl /opt/homebrew/opt/curl/bin/curl (8.10.1 OpenSSL/3.4.0) - rejected 12/12 test chains; normal site github.com OK  (1.7s)
-    -- step 3 finished in 3.6s
+━━ 3/13  curl ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 10:42:05
+   Each curl binary must reject all 12 test chains.
+  ❌ FAIL  curl /usr/bin/curl (8.7.1 LibreSSL/3.3.6) · TRUSTS 6/12 compromised test chai…  1.9s
+           ↳ Apply the /etc/ssl/cert.pem fix from step 2 (macOS updates do not update that file).
+  ✅ PASS  curl /opt/homebrew/opt/curl/bin/curl (8.10.1 OpenSSL/3.4.0) · rejected 12/12 …  1.7s
+   └ step done in 3.6s
 ```
 
 *(Example output.)*
 
 | Status | Meaning |
 |---|---|
-| `PASS` | Safe. |
-| `FAIL` | **Must fix.** This program still trusts the compromised CAs, or it is a version without the fix. |
-| `WARN` | The script could not decide (for example, no network to the test servers), or something needs a look. Read the detail. |
-| `SKIP` | Not installed or not applicable. Nothing to do. |
-| `INFO` | For reference only. |
+| ✅ `PASS` | Safe. |
+| ❌ `FAIL` | **Must fix.** This program still trusts the compromised CAs, or it is a version without the fix. |
+| 🟡 `WARN` | The script could not decide (for example, no network to the test servers), or something needs a look. Read the detail. |
+| ⚪ `SKIP` | Not installed or not applicable. Nothing to do. |
+| 🔵 `INFO` | For reference only. |
 
 At the end you get:
 
-- a **summary table** with every check, its status and its time;
-- a **What to do** list containing only the items you need to act on;
-- `RESULT: OK` or `RESULT: NOT OK`, plus the path of the log file.
+- a **summary** with one row per step: how many checks are ✅ / ❌ / 🟡 / ⚪, and how long the step took;
+- a **What to do** list with only what you need to act on. Checks that need the same fix share one line;
+- `RESULT: OK` or `RESULT: NOT OK`;
+- the list of fixes `--fix` can apply for you, and the path of the log file.
 
-The log file has more detail than the screen, such as the result for each of the 12 test servers. Send it to IT if they ask.
+The log file is plain text with every check on its own line (`[PASS]`, `[FAIL]`…), the full detail and the result for each of the 12 test servers. Send it to IT if they ask. With `--no-color`, or when the output is not a terminal, the screen shows the same plain format as the log.
 
 ---
 
@@ -138,17 +139,17 @@ curl -fsSL https://raw.githubusercontent.com/wakumo/emudhra-check/main/emudhra-c
 ```
 
 1. All checks run first, the same as in check mode.
-2. The script lists every fix it can apply. Fixes that need your admin password are marked `[admin password]`.
+2. The script lists every fix it can apply. Fixes that need your admin password are marked 🔑 `admin password`.
 3. It asks `Apply these fixes now? [y/N]`. Nothing changes unless you answer `y`.
-4. It applies each fix and prints `[DONE]`, `[FAILED]` or `[SKIP]` with the time it took. The full command output goes to the log.
+4. It applies each fix and prints ✅ `DONE`, ❌ `FAILED` or ⚪ `SKIP` with the time it took. The full command output goes to the log.
 5. It runs **all checks again** and saves the result to `...-after-fix.log`, so you can see what is fixed now.
 
 | Problem found | Automatic fix | Needs password |
 |---|---|---|
 | `/etc/ssl/cert.pem` still has the affected roots (Apple curl/git/python3) | The advisory's workaround: remove the 2 roots. The original is kept as `/etc/ssl/cert.pem.pre-emudhra`. | yes |
 | Apple's built-in pip trusts the test servers | The advisory's `sitecustomize.py` fix (`PIP_CERT=/etc/ssl/cert.pem`) | yes |
-| Homebrew ca-certificates / curl / git / node / python / uv / mise out of date | One `brew update && brew upgrade <those formulas>`, run as you | no |
-| Old certifi or pip in a virtualenv, pyenv, conda or python.org Python | `python -m pip install --upgrade 'certifi>=2026.10.19'` / `'pip>=26.2.2'` | no |
+| Homebrew ca-certificates / curl / git / node / python / uv / mise out of date | `brew update`, then `brew upgrade` for each formula, run as you. A formula that fails, or that Homebrew has disabled (such as `python@3.8`), does not stop the others. | no |
+| Old certifi or pip in a virtualenv, pyenv, conda or python.org Python | `python -m pip install --upgrade 'certifi>=2026.10.19'` / `'pip>=26.2.2'`. For a uv virtualenv without pip: `uv pip install`. For certifi installed with pip into Homebrew Python: the same with `--break-system-packages`. | no |
 | python.org Python cannot verify any site | Runs its `Install Certificates.command` | no |
 | Java trusts the test servers | Adds the 16 compromised fingerprints to the JDK's `blocked.certs` / `blacklisted.certs`. The original is kept as `*.pre-emudhra`. | if the JDK is system-wide |
 | uv, pixi, rustup, deno, mise, Claude Code out of date | Their own self-update command | no |
@@ -190,7 +191,7 @@ curl -fsSL https://raw.githubusercontent.com/wakumo/emudhra-check/main/emudhra-c
 | `--deep` | Include `node_modules` folders in the disk scan (slower). |
 | `--domain a.com,b.com` | Also check the certificates served by your domains (step 13). |
 | `--log FILE` | Save the log to `FILE` instead of the Desktop. |
-| `--no-color` | Plain output. |
+| `--no-color` | Plain output, without colors or icons. |
 | `--help` | Show the help text. |
 
 Exit code: `0` = no FAIL, `1` = at least one FAIL. You can use it in scripts or MDM.
