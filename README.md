@@ -15,25 +15,36 @@ A one-command check that tells you whether your Mac still trusts the compromised
    curl -fsSL https://raw.githubusercontent.com/wakumo/emudhra-check/main/emudhra-check.sh | bash
    ```
 
-3. Wait 1 to 3 minutes until you see `RESULT:`.
+3. Wait about 1 minute until you see `RESULT:`.
    - `RESULT: OK`: nothing to do.
-   - `RESULT: NOT OK`: follow the **What to do** list at the end of the output. Each line says what to update and how.
-4. A log file is saved on your **Desktop** (`emudhra-check-<computer>-<date>.log`). Send it to IT if they ask for it.
+   - `RESULT: NOT OK`: see step 4.
+4. Fix what it found. You can do this in two ways:
+   - **Automatic.** Run it again with `--fix`. The script shows the list of fixes it can apply and asks `Apply these fixes now? [y/N]`. It may also ask for your Mac password (admin). Then it applies the fixes and checks everything again:
 
-After you fix something, run the same command again until you get `RESULT: OK`.
+     ```bash
+     curl -fsSL https://raw.githubusercontent.com/wakumo/emudhra-check/main/emudhra-check.sh | bash -s -- --fix
+     ```
+
+   - **By hand.** Follow the **What to do** list at the end of the output. Each line says what to update and how.
+5. A log file is saved on your **Desktop** (`emudhra-check-<computer>-<date>.log`, plus `...-after-fix.log` after `--fix`). Send it to IT if they ask for it.
+
+Some items always need you: installing macOS/Safari updates, updating apps like Slack or VS Code, and rebuilding Docker images. Run the check again afterwards until you get `RESULT: OK`.
 
 ### Hướng dẫn nhanh (Tiếng Việt)
 
 1. Mở **Terminal** (`⌘ Space` → gõ `Terminal` → Enter).
-2. Dán lệnh ở trên rồi bấm Enter, đợi khoảng 1 đến 3 phút.
-3. Nếu thấy `RESULT: OK` thì không cần làm gì. Nếu thấy `RESULT: NOT OK` thì làm theo danh sách **What to do** ở cuối. Mỗi dòng ghi rõ cần cập nhật gì và lệnh để sửa.
-4. File log nằm trên Desktop. Gửi cho IT khi được yêu cầu, rồi sửa xong thì chạy lại.
+2. Dán lệnh ở trên rồi bấm Enter, đợi khoảng 1 phút. Mặc định script **chỉ kiểm tra**, không sửa gì trên máy.
+3. Nếu thấy `RESULT: OK` thì không cần làm gì.
+4. Nếu thấy `RESULT: NOT OK`, có hai cách sửa:
+   - Chạy lại với `--fix` (lệnh ở bước 4 phía trên). Script liệt kê những gì nó sẽ sửa, hỏi `[y/N]`, có thể hỏi mật khẩu máy, sửa xong thì tự kiểm tra lại.
+   - Hoặc tự làm theo danh sách **What to do** ở cuối kết quả.
+5. Cập nhật macOS, cập nhật app (Slack, VS Code…) và rebuild Docker image thì phải tự làm. File log nằm trên Desktop, gửi cho IT khi được yêu cầu.
 
 ---
 
 ## Is it safe to run?
 
-Yes. The script is **read-only**.
+Yes. By default (check mode, a dry-run) the script is **read-only**.
 
 - It does **not** change, install or delete anything. It does not ask for your password or need `sudo`.
 - It does **not** need git, Xcode, Homebrew or Python. It only uses tools that ship with macOS, and it skips anything you do not have.
@@ -41,7 +52,7 @@ Yes. The script is **read-only**.
 - The only file it writes is the log on your Desktop.
 - One exception, only if Docker is running: to read the CA file inside each local image, it creates a stopped container from the image (it never starts it) and removes it right away. Use `--no-docker` to skip this.
 
-Fixes are only **suggested**, never applied. Some fixes need an admin password; you decide whether to run them.
+In check mode, fixes are only **suggested**. They are applied only when you run with `--fix` **and** answer `y`. See [Auto-fix mode](#auto-fix-mode---fix).
 
 If you prefer to read the script before running it:
 
@@ -128,6 +139,48 @@ The log file has more detail than the screen, such as the result for each of the
 
 ---
 
+## Auto-fix mode (`--fix`)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/wakumo/emudhra-check/main/emudhra-check.sh | bash -s -- --fix
+```
+
+1. All checks run first, the same as in check mode.
+2. The script lists every fix it can apply. Fixes that need your admin password are marked `[admin password]`.
+3. It asks `Apply these fixes now? [y/N]`. Nothing changes unless you answer `y`.
+4. It applies each fix and prints `[DONE]`, `[FAILED]` or `[SKIP]` with the time it took. The full command output goes to the log.
+5. It runs **all checks again** and saves the result to `...-after-fix.log`, so you can see what is fixed now.
+
+| Problem found | Automatic fix | Needs password |
+|---|---|---|
+| `/etc/ssl/cert.pem` still has the affected roots (Apple curl/git/python3) | The advisory's workaround: remove the 2 roots. The original is kept as `/etc/ssl/cert.pem.pre-emudhra`. | yes |
+| Apple's built-in pip trusts the test servers | The advisory's `sitecustomize.py` fix (`PIP_CERT=/etc/ssl/cert.pem`) | yes |
+| Homebrew ca-certificates / curl / git / node / python / uv / mise out of date | One `brew update && brew upgrade <those formulas>`, run as you | no |
+| Old certifi or pip in a virtualenv, pyenv, conda or python.org Python | `python -m pip install --upgrade 'certifi>=2026.10.19'` / `'pip>=26.2.2'` | no |
+| python.org Python cannot verify any site | Runs its `Install Certificates.command` | no |
+| Java trusts the test servers | Adds the 16 compromised fingerprints to the JDK's `blocked.certs` / `blacklisted.certs`. The original is kept as `*.pre-emudhra`. | if the JDK is system-wide |
+| uv, pixi, rustup, deno, mise, Claude Code out of date | Their own self-update command | no |
+
+These are **not** fixed automatically. The script tells you what to do:
+
+- macOS and Safari updates, because they need a restart;
+- Electron apps (Slack, VS Code…): update them from the app;
+- Docker images: rebuild and redeploy;
+- Node installed with nvm/fnm/volta: install the patched version with your version manager;
+- settings that turn off certificate verification: remove them yourself.
+
+To undo the `/etc/ssl/cert.pem` change: `sudo cp -p /etc/ssl/cert.pem.pre-emudhra /etc/ssl/cert.pem`. To undo a Java change, copy the `.pre-emudhra` file back in the same way.
+
+For MDM or scripts, `--fix --yes` applies the fixes without asking. It needs to run as the logged-in user. Fixes that need sudo are skipped if sudo is not available.
+
+---
+
+## Speed
+
+Every live test runs in parallel: all 12 test servers at once for each program, and the pip checks at the same time. The two slow parts start in the background as soon as the script starts: the macOS update check (`softwareupdate -l`) and the disk scan. A typical run takes about 1 minute. Use `--quick` to skip the update check, the disk scan and Docker.
+
+---
+
 ## Options
 
 ```bash
@@ -136,6 +189,9 @@ curl -fsSL https://raw.githubusercontent.com/wakumo/emudhra-check/main/emudhra-c
 
 | Option | What it does |
 |---|---|
+| *(none)* | Check only (dry-run). Changes nothing. |
+| `--fix` | Check, then offer to apply the automatic fixes, then check again. |
+| `--yes` | With `--fix`: do not ask for confirmation. |
 | `--quick` | Skip the slow parts: the macOS update check, the disk scan and Docker. |
 | `--no-scan` | Skip step 11, the CA file scan. |
 | `--no-docker` | Skip step 12, Docker. |

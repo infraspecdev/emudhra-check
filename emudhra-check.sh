@@ -14,7 +14,13 @@
 #   Electron apps, TLS-related settings, CA bundle files on disk and local
 #   Docker images.
 #
-# What it does NOT do
+# Modes
+#   Default (check only / dry-run): changes nothing on this Mac.
+#   --fix : after the checks, lists what can be fixed automatically, asks once
+#           for confirmation (and your password if a fix needs sudo), applies
+#           the fixes, then runs all checks again to verify.
+#
+# What it does NOT do (check mode)
 #   It changes nothing on this Mac. It needs no sudo, git, Xcode or Homebrew.
 #   The only file it writes is the log (see --log). If Docker is running, it
 #   creates a stopped container per local image to read its CA file and removes
@@ -28,6 +34,8 @@
 # Source and documentation: https://github.com/wakumo/emudhra-check
 #
 # Options
+#   --fix             Apply the automatic fixes after the checks, then re-check.
+#   --yes             With --fix: do not ask for confirmation (for MDM/scripts).
 #   --quick           Skip the slow steps (macOS update check, disk scan, Docker).
 #   --no-scan         Skip the CA bundle file scan of the home folder.
 #   --no-docker       Skip the Docker image check.
@@ -40,7 +48,7 @@
 #
 # Exit code: 0 = no FAIL, 1 = at least one FAIL, 2 = bad usage.
 
-SCRIPT_VERSION="1.0.0 (2026-10-22)"
+SCRIPT_VERSION="1.1.0 (2026-10-22)"
 
 main() {
 
@@ -127,8 +135,14 @@ ADVISORY="https://emudhra.we-have-a-problem.com/"
 # Options
 # ---------------------------------------------------------------------------
 OPT_QUICK=0; OPT_SCAN=1; OPT_DOCKER=1; OPT_DEEP=0; OPT_DOMAINS=""; OPT_LOG=""; OPT_COLOR=1
+OPT_FIX=0; OPT_YES=0; OPT_AFTER_FIX=0
+EMD_ORIG=("$@")
 while [ $# -gt 0 ]; do
   case "$1" in
+    --fix) OPT_FIX=1 ;;
+    --check|--dry-run) OPT_FIX=0 ;;
+    --yes|-y) OPT_YES=1 ;;
+    --after-fix) OPT_AFTER_FIX=1 ;;
     --quick) OPT_QUICK=1; OPT_SCAN=0; OPT_DOCKER=0 ;;
     --no-scan) OPT_SCAN=0 ;;
     --no-docker) OPT_DOCKER=0 ;;
@@ -159,8 +173,10 @@ if [ -z "$OPT_LOG" ]; then
   OPT_LOG="$d/emudhra-check-$(hostname -s 2>/dev/null || echo mac)-$(date +%Y%m%d-%H%M%S).log"
 fi
 LOG="$OPT_LOG"
+[ $OPT_AFTER_FIX -eq 1 ] && LOG="${LOG%.log}-after-fix.log"
 : > "$LOG" 2>/dev/null || { LOG="/dev/null"; echo "Warning: cannot write log file $OPT_LOG"; }
 
+[ -n "$TMP" ] && [ -d "$TMP" ] && cd / && rm -rf "$TMP"
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/emudhra-check.XXXXXX") || { echo "Cannot create temp dir"; return 1; }
 trap 'rm -rf "$TMP"' EXIT
 cd "$TMP" || return 1
@@ -214,6 +230,39 @@ record() {
   R_STATUS[$R_N]=$st; R_STEP[$R_N]=$CUR_STEP_NO; R_NAME[$R_N]="$name"
   R_SECS[$R_N]=$(fmt_secs $el); R_FIX[$R_N]="$fix"
   R_N=$((R_N + 1))
+}
+
+# ---------------------------------------------------------------------------
+# Automatic fixes (only applied with --fix)
+# ---------------------------------------------------------------------------
+FX_N=0; FX_SUDO=(); FX_LABEL=(); FX_CMD=(); BREW_FORMULAS=""
+# add_fix NEEDS_SUDO(0/1) "label" "shell command"
+add_fix() {
+  local i=0
+  while [ $i -lt $FX_N ]; do [ "${FX_CMD[$i]}" = "$3" ] && return 0; i=$((i + 1)); done
+  FX_SUDO[$FX_N]=$1; FX_LABEL[$FX_N]="$2"; FX_CMD[$FX_N]="$3"; FX_N=$((FX_N + 1))
+}
+# add_brew FORMULA : collected into one "brew upgrade" fix
+add_brew() {
+  case " $BREW_FORMULAS " in *" $1 "*) ;; *) BREW_FORMULAS="$BREW_FORMULAS $1" ;; esac
+}
+# brew_formula_of PATH : Homebrew formula owning a binary path, or nothing
+brew_formula_of() {
+  local r; r=$(resolve "$1")
+  case "$r" in */Cellar/*) echo "$r" | sed -E 's#.*/Cellar/([^/]+)/.*#\1#' ;; esac
+}
+# py_pip_fix PY "pkg spec..." : pip upgrade fix for interpreters pip may change
+py_pip_fix() {
+  local py="$1" r f; shift
+  if [ -f "$(dirname "$py")/../pyvenv.cfg" ]; then        # virtualenv: pip may always change it
+    add_fix 0 "Upgrade $* in virtualenv $(cd "$(dirname "$py")/.." && pwd)" "\"$py\" -m pip install --disable-pip-version-check --upgrade $*"
+    return
+  fi
+  r=$(resolve "$py")
+  f=$(brew_formula_of "$py")
+  if [ -n "$f" ]; then add_brew "$f"; return; fi           # Homebrew Python is externally managed
+  case "$r" in /usr/bin/*|/Library/Developer/*|/Applications/Xcode*) return ;; esac
+  add_fix 0 "Upgrade $* for $py" "\"$py\" -m pip install --disable-pip-version-check --upgrade $*"
 }
 
 # ---------------------------------------------------------------------------
@@ -366,6 +415,29 @@ t_git_one() {    # BIN HOST
   echo "$2 $st $(echo "$err" | grep -v '^$' | tail -1 | cut -c1-160)"
 }
 
+t_reach_one() {   # CURL HOST : UP if a TCP+TLS exchange happened (any certificate verdict)
+  local c="$1" rc
+  [ -x "$c" ] || c=curl
+  "$c" -s -o /dev/null --connect-timeout 6 --max-time 10 "https://$2/" </dev/null >/dev/null 2>&1; rc=$?
+  case $rc in 5|6|7|28|56) echo "$2 DOWN" ;; *) echo "$2 UP" ;; esac
+}
+
+# scan_bundles : list candidate PEM bundle files (runs in the background)
+scan_bundles() {
+  local NAMES prune_nm d
+  NAMES='( -name cacert.pem -o -name cert.pem -o -name ca-bundle.crt -o -name ca-bundle.pem -o -name ca-certificates.crt -o -name cacerts.pem -o -name tls-ca-bundle.pem -o -name ca-root-nss.crt )'
+  prune_nm='-name node_modules -prune -o'
+  [ $OPT_DEEP -eq 1 ] && prune_nm=""
+  {
+    run_to 240 find "$HOME" -xdev \( -path "$HOME/Library" -o -path "$HOME/.Trash" -o -path "$HOME/.cache" \
+      -o -path "$HOME/Pictures" -o -path "$HOME/Movies" -o -path "$HOME/Music" -o -name .git \) -prune -o \
+      $prune_nm -type f $NAMES -print 2>/dev/null
+    for d in "$HOME/Library/Python" $BREW_PREFIXES /Library/Frameworks/Python.framework /opt/local /opt/anaconda3 /opt/miniconda3; do
+      [ -d "$d" ] && run_to 120 find "$d" \( -name .git -o -path "*/Homebrew/Library" \) -prune -o -type f $NAMES -print 2>/dev/null
+    done
+  } </dev/null | sort -u
+}
+
 # par_hosts FUNC BIN OUTFILE : run FUNC BIN HOST for all hosts in parallel
 par_hosts() {
   local fn=$1 bin=$2 outf=$3 h i=0 pids=""
@@ -399,25 +471,34 @@ try:
 except Exception:
     print("#pip none")
 print("#pipcert %s" % os.environ.get("PIP_CERT", "-"))
-for name, mk in ctxs:
-    for h in hosts:
-        s = None
+def probe(job):
+    name, mk, h = job
+    s = None
+    try:
+        ctx = mk()
+        s = socket.create_connection((h, 443), timeout=10)
+        t = ctx.wrap_socket(s, server_hostname=h)
+        t.close()
+        return "%s %s ACCEPT" % (name, h)
+    except Exception as e:
+        m = (type(e).__name__ + ": " + str(e)).replace("\n", " ")[:160]
+        cert = (VE is not None and isinstance(e, VE)) or "CERTIFICATE_VERIFY_FAILED" in m \
+            or "certificate verify failed" in m
+        return "%s %s %s %s" % (name, h, "REJECT" if cert else "NET", m)
+    finally:
         try:
-            ctx = mk()
-            s = socket.create_connection((h, 443), timeout=10)
-            t = ctx.wrap_socket(s, server_hostname=h)
-            t.close()
-            print("%s %s ACCEPT" % (name, h))
-        except Exception as e:
-            m = (type(e).__name__ + ": " + str(e)).replace("\n", " ")[:160]
-            cert = (VE is not None and isinstance(e, VE)) or "CERTIFICATE_VERIFY_FAILED" in m \
-                or "certificate verify failed" in m
-            print("%s %s %s %s" % (name, h, "REJECT" if cert else "NET", m))
-        finally:
-            try:
-                s and s.close()
-            except Exception:
-                pass
+            s and s.close()
+        except Exception:
+            pass
+jobs = [(n, mk, h) for n, mk in ctxs for h in hosts]
+try:
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=16) as ex:
+        results = list(ex.map(probe, jobs))
+except ImportError:
+    results = [probe(j) for j in jobs]
+for line in results:
+    print(line)
 PYEOF
 
 cat > "$TMP/check_tls.js" <<'JSEOF'
@@ -443,12 +524,24 @@ JSEOF
 cat > "$TMP/EmudhraCheck.java" <<'JAVAEOF'
 import java.net.InetSocketAddress;
 import java.net.Socket;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import javax.net.ssl.*;
 
 public class EmudhraCheck {
-    public static void main(String[] args) {
-        SSLSocketFactory f = (SSLSocketFactory) SSLSocketFactory.getDefault();
-        for (String h : args) {
+    public static void main(String[] args) throws Exception {
+        final SSLSocketFactory f = (SSLSocketFactory) SSLSocketFactory.getDefault();
+        ExecutorService pool = Executors.newFixedThreadPool(16);
+        List<Future<String>> res = new ArrayList<>();
+        for (final String h : args) res.add(pool.submit(() -> probe(f, h)));
+        for (Future<String> r : res) System.out.println(r.get());
+        pool.shutdown();
+    }
+
+    static String probe(SSLSocketFactory f, String h) {
             String r;
             Socket raw = new Socket();
             try {
@@ -472,8 +565,7 @@ public class EmudhraCheck {
                 try { raw.close(); } catch (Exception e) { }
             }
             r = r.replace('\n', ' ');
-            System.out.println(h + " " + (r.length() > 170 ? r.substring(0, 170) : r));
-        }
+            return h + " " + (r.length() > 170 ? r.substring(0, 170) : r);
     }
 }
 JAVAEOF
@@ -524,7 +616,13 @@ out "Advisory : $ADVISORY"
 out "Started  : $(date '+%Y-%m-%d %H:%M:%S %Z')"
 out "Machine  : $(hostname -s 2>/dev/null) | $OS_NAME $OS_VER ($OS_BUILD) | $(uname -m) | user $(id -un)"
 out "Log file : $LOG"
-out "This script is read-only: it changes nothing on this Mac."
+if [ $OPT_FIX -eq 1 ]; then
+  out "Mode     : ${C_BOLD}CHECK + FIX${C_OFF} - checks first, then asks before applying automatic fixes, then re-checks."
+elif [ $OPT_AFTER_FIX -eq 1 ]; then
+  out "Mode     : ${C_BOLD}RE-CHECK after fixes${C_OFF} (read-only)"
+else
+  out "Mode     : CHECK ONLY (dry-run) - changes nothing on this Mac. Add --fix to apply automatic fixes."
+fi
 out "Statuses : PASS = safe | FAIL = must fix | WARN = could not decide or needs attention | SKIP = not installed / not run | INFO = for reference"
 if [ "$(id -u)" = 0 ]; then
   out "${C_WARN}Note: running as root. Run it as your normal user so it checks your own tools and settings.${C_OFF}"
@@ -533,21 +631,34 @@ if [ "$(uname -s)" != Darwin ]; then
   out "${C_WARN}Note: this is not macOS; macOS-specific checks will be skipped.${C_OFF}"
 fi
 
+# Slow, independent jobs start now in the background and are collected later.
+SWU_PID=""; SCAN_PID=""
+if [ "$(uname -s)" = Darwin ] && [ $OPT_QUICK -eq 0 ] && [ -x /usr/sbin/softwareupdate ]; then
+  run_to 150 /usr/sbin/softwareupdate -l > "$TMP/swu.out" 2>&1 </dev/null &
+  SWU_PID=$!
+fi
+if [ $OPT_SCAN -eq 1 ]; then
+  scan_bundles > "$TMP/bundles" 2>/dev/null </dev/null &
+  SCAN_PID=$!
+fi
+
 # ===========================================================================
 # Step 1: connectivity
 # ===========================================================================
 step "Connectivity to the advisory's test hosts" "Live checks need to reach the 12 test hosts on port 443."
 check_start
 reach=0; unreach=""
-for h in $TEST_HOSTS; do
-  if run_to 6 bash -c "exec 3<>/dev/tcp/$h/443" >/dev/null 2>&1; then reach=$((reach + 1)); else unreach="$unreach ${h%%.*}"; fi
-done
+par_hosts t_reach_one /usr/bin/curl "$TMP/reach"
+while read -r h st; do
+  [ "$h" = "$CONTROL_HOST" ] && continue
+  if [ "$st" = UP ]; then reach=$((reach + 1)); else unreach="$unreach ${h%%.*}"; fi
+done < "$TMP/reach"
 if [ $reach -eq $N_TEST ]; then
-  record PASS "Test hosts reachable" "$reach/$N_TEST reachable on TCP 443"
+  record PASS "Test hosts reachable" "$reach/$N_TEST reachable on port 443"
 elif [ $reach -gt 0 ]; then
   record WARN "Test hosts reachable" "only $reach/$N_TEST reachable (not:$unreach); some live results will be inconclusive"
 else
-  record WARN "Test hosts reachable" "none reachable directly; live results will be inconclusive (offline, firewall or proxy-only network)"
+  record WARN "Test hosts reachable" "none reachable; live results will be inconclusive (offline, firewall or proxy-only network)"
 fi
 check_start
 if [ -n "$HTTPS_PROXY$https_proxy$ALL_PROXY$all_proxy" ]; then
@@ -563,16 +674,22 @@ step_end
 step "macOS system trust" "Safari and native apps use the macOS trust store; Apple blocked the intermediates on 19 Oct 2026."
 check_start
 if [ "$(uname -s)" = Darwin ]; then
-  if [ $OPT_QUICK -eq 1 ]; then
+  if [ -z "$SWU_PID" ]; then
     record SKIP "macOS software updates" "skipped (--quick)"
   else
-    upd=$(run_to 120 /usr/sbin/softwareupdate -l 2>&1 </dev/null)
-    labels=$(echo "$upd" | grep -E '^[[:space:]]*\* (Label|Title):' | sed -E 's/^[[:space:]]*\* (Label|Title): *//' | head -5 | tr '\n' ';')
+    wait $SWU_PID 2>/dev/null
+    upd=$(cat "$TMP/swu.out" 2>/dev/null)
+    titles=$(echo "$upd" | grep -E '^[[:space:]]*Title:' | sed -E 's/^[[:space:]]*Title: *([^,]*), *Version: *([^,]*).*/\1 \2/')
+    [ -n "$titles" ] || titles=$(echo "$upd" | grep -E '^[[:space:]]*\* Label:' | sed -E 's/^[[:space:]]*\* Label: *//')
+    important=$(echo "$titles" | grep -iE 'macOS|Safari|Security' | tr '\n' ';')
+    others=$(echo "$titles" | grep -viE 'macOS|Safari|Security' | grep . | tr '\n' ';')
     if echo "$upd" | grep -qi 'No new software available'; then
       record PASS "macOS software updates" "$OS_NAME $OS_VER is up to date"
-    elif [ -n "$labels" ]; then
-      record FAIL "macOS software updates" "updates available: $labels" \
+    elif [ -n "$important" ]; then
+      record FAIL "macOS software updates" "updates available: $important${others:+ (also: $others)}" \
         "Install them: System Settings > General > Software Update, then restart."
+    elif [ -n "$others" ]; then
+      record INFO "macOS software updates" "macOS and Safari are up to date; other updates available: $others"
     else
       record WARN "macOS software updates" "could not get the update list ($(echo "$upd" | tail -1 | cut -c1-100))" \
         "Check manually: System Settings > General > Software Update."
@@ -614,6 +731,8 @@ check_start
 if [ -f /etc/ssl/cert.pem ]; then
   roots=$(bundle_roots /etc/ssl/cert.pem)
   if [ -n "$roots" ]; then
+    add_fix 1 "Remove the affected roots from /etc/ssl/cert.pem (advisory workaround, backup kept)" \
+"B=/etc/ssl/cert.pem.pre-emudhra; [ -f \$B ] || cp -p /etc/ssl/cert.pem \$B; awk '/^(###|===) /{skip=0} /^=== .*\\/CN=(AAA Certificate Services|emSign ECC Root CA - G3)\$/{skip=1} !skip' \$B > /etc/ssl/cert.pem.new && [ \$(grep -c 'BEGIN CERTIFICATE' /etc/ssl/cert.pem.new) -ge 50 ] && cat /etc/ssl/cert.pem.new > /etc/ssl/cert.pem; rc=\$?; rm -f /etc/ssl/cert.pem.new; exit \$rc"
     record FAIL "/etc/ssl/cert.pem" "still contains: $roots. Used by Apple's built-in curl, git, python3, perl, ruby, openssl." \
 "Advisory workaround (needs admin password; macOS updates may restore the file):
 sudo cp -p /etc/ssl/cert.pem /etc/ssl/cert.pem.bak && sudo awk '/^(###|===) /{skip=0} /^=== .*\\/CN=(AAA Certificate Services|emSign ECC Root CA - G3)\$/{skip=1} !skip' /etc/ssl/cert.pem.bak | sudo tee /etc/ssl/cert.pem > /dev/null"
@@ -656,7 +775,7 @@ while IFS= read -r b; do
   if [ $J_STATUS = FAIL ]; then
     case "$b" in
       /usr/bin/curl) fix="Apply the /etc/ssl/cert.pem fix from step 2 (macOS updates do not update that file)." ;;
-      */homebrew/*|/usr/local/*) fix="brew update && brew upgrade ca-certificates curl" ;;
+      */homebrew/*|/usr/local/*) fix="brew update && brew upgrade ca-certificates curl"; add_brew ca-certificates; add_brew curl ;;
       *) fix="Update the CA bundle used by this curl (curl -V shows the build; see $ADVISORY)." ;;
     esac
   fi
@@ -683,7 +802,7 @@ while IFS= read -r b; do
   if [ $J_STATUS = FAIL ]; then
     case "$b" in
       /usr/bin/git) fix="Apply the /etc/ssl/cert.pem fix from step 2. Also check 'git config --global --get http.sslCAInfo'." ;;
-      */homebrew/*|/usr/local/*) fix="brew update && brew upgrade ca-certificates git. Also check 'git config --global --get http.sslCAInfo'." ;;
+      */homebrew/*|/usr/local/*) fix="brew update && brew upgrade ca-certificates git. Also check 'git config --global --get http.sslCAInfo'."; add_brew ca-certificates; add_brew git ;;
       *) fix="Update the CA bundle this git uses ('git config --show-origin --get-regexp http.ssl')." ;;
     esac
   fi
@@ -731,12 +850,20 @@ while IFS= read -r py; do
   if [ $J_STATUS = FAIL ]; then
     case "$cafile" in
       /etc/ssl/cert.pem|/private/etc/ssl/cert.pem) fix="This Python uses /etc/ssl/cert.pem: apply the fix from step 2." ;;
-      */homebrew/*|/usr/local/*) fix="brew update && brew upgrade ca-certificates" ;;
+      */homebrew/*|/usr/local/*) fix="brew update && brew upgrade ca-certificates"; add_brew ca-certificates ;;
       *) fix="Python uses $cafile; update that bundle (for python.org builds: upgrade certifi and run 'Install Certificates.command')." ;;
     esac
   fi
+  pyr=$(resolve "$py")
+  pyorg_cmd=""
+  case "$pyr" in
+    /Library/Frameworks/Python.framework/Versions/*)
+      pyx=$(echo "$pyr" | sed -E 's#.*/Versions/([0-9]+\.[0-9]+)/.*#\1#')
+      [ -f "/Applications/Python $pyx/Install Certificates.command" ] && pyorg_cmd="/Applications/Python $pyx/Install Certificates.command" ;;
+  esac
   if [ $J_STATUS = WARN ] && [ "$J_CTRL_FAIL" = 1 ]; then
     fix="This Python cannot verify normal sites either. python.org builds: run 'Install Certificates.command' in /Applications/Python 3.x/."
+    [ -n "$pyorg_cmd" ] && add_fix 0 "Install certifi certificates for python.org Python $pyx" "/bin/sh \"$pyorg_cmd\""
   fi
   record $J_STATUS "python $pv ($py) ssl default" "$J_DETAIL" "$fix"
 
@@ -751,6 +878,7 @@ while IFS= read -r py; do
     croots=$(bundle_roots "$certifi_p")
     if [ $J_STATUS = FAIL ] || [ -n "$croots" ]; then
       fix="\"$py\" -m pip install --upgrade 'certifi>=$FIX_CERTIFI'   (Homebrew Python: brew upgrade python-certifi; also upgrade it in each virtualenv)"
+      py_pip_fix "$py" "'certifi>=$FIX_CERTIFI'"
       if [ $J_STATUS != FAIL ]; then J_STATUS=FAIL; J_DETAIL="bundle still contains: $croots; $J_DETAIL"; fi
     elif ! ver_ge "$certifi_v" "$FIX_CERTIFI"; then
       J_DETAIL="$J_DETAIL; version older than $FIX_CERTIFI but its bundle has no affected roots"
@@ -764,10 +892,18 @@ while IFS= read -r py; do
     record SKIP "python $pv pip" "pip not installed for this interpreter"
   else
     : > "$TMP/res"
+    k=0; pids=""
+    for h in $PIP_HOSTS $PIP_CONTROL_HOST; do      # the pip runs go in parallel
+      k=$((k + 1))
+      PIP_DISABLE_PIP_VERSION_CHECK=1 PIP_NO_INPUT=1 run_to 60 "$py" -m pip download --no-deps --no-cache-dir \
+        --retries 0 --timeout 10 -d "$TMP/pipdl.$k" --index-url "https://$h/simple/" \
+        emudhra-check-nonexistent-probe > "$TMP/pip.$k" 2>&1 </dev/null &
+      pids="$pids $!"
+    done
+    for pp in $pids; do wait $pp 2>/dev/null; done
+    k=0
     for h in $PIP_HOSTS $PIP_CONTROL_HOST; do
-      po=$(PIP_DISABLE_PIP_VERSION_CHECK=1 PIP_NO_INPUT=1 run_to 60 "$py" -m pip download --no-deps --no-cache-dir \
-            --retries 0 --timeout 10 -d "$TMP/pipdl" --index-url "https://$h/simple/" \
-            emudhra-check-nonexistent-probe 2>&1 </dev/null)
+      k=$((k + 1)); po=$(cat "$TMP/pip.$k" 2>/dev/null)
       if echo "$po" | grep -qiE 'CERTIFICATE_VERIFY_FAILED|SSLCertVerificationError|confirming the ssl certificate|certificate verify failed|SSLError'; then st=REJECT
       elif echo "$po" | grep -qiE 'Could not find a version|No matching distribution'; then st=ACCEPT
       else st=NET; fi
@@ -783,8 +919,12 @@ while IFS= read -r py; do
       if [ "$py" = /usr/bin/python3 ]; then
         fix="Built-in pip uses its own old copy of the roots. After the step 2 fix, run (advisory):
 F=\"\$(/usr/bin/python3 -c 'import sysconfig; print(sysconfig.get_path(\"stdlib\"))')/sitecustomize.py\" && echo 'import os; os.environ.setdefault(\"PIP_CERT\", \"/etc/ssl/cert.pem\")' | sudo tee -a \"\$F\" > /dev/null && sudo chmod 644 \"\$F\""
+        stdlib=$(/usr/bin/python3 -c 'import sysconfig; print(sysconfig.get_path("stdlib"))' 2>/dev/null </dev/null)
+        [ -n "$stdlib" ] && add_fix 1 "Make Apple's pip use the fixed /etc/ssl/cert.pem (advisory, sitecustomize.py)" \
+          "F='$stdlib/sitecustomize.py'; grep -q PIP_CERT \"\$F\" 2>/dev/null || echo 'import os; os.environ.setdefault(\"PIP_CERT\", \"/etc/ssl/cert.pem\")' >> \"\$F\"; chmod 644 \"\$F\""
       else
         fix="\"$py\" -m pip install --upgrade 'pip>=$FIX_PIP'"
+        py_pip_fix "$py" "'pip>=$FIX_PIP'"
       fi
     elif ! ver_ge "$pipv" "$FIX_PIP" && [ $J_STATUS = PASS ]; then
       J_DETAIL="$J_DETAIL (pip $pipv < $FIX_PIP but this setup already rejects)"
@@ -812,12 +952,15 @@ while IFS= read -r nb; do
   found=1
   check_start
   nv=$("$nb" --version 2>/dev/null </dev/null | tr -d 'v')
-  [ -z "$nv" ] && { record WARN "node $nb" "could not run it"; continue; }
+  [ -z "$nv" ] && { record SKIP "node $nb" "binary does not start (broken or unlinked install), not usable"; continue; }
   EMD_HOSTS="$ALL_HOSTS" run_to 60 "$nb" "$TMP/check_tls.js" > "$TMP/res" 2>/dev/null </dev/null
   judge "$TMP/res"
   ps=$(patched_status "$nv" "$FIX_NODE")
   fix=""
   [ "$ps" != PASS ] && J_DETAIL="$J_DETAIL; version $nv is not a patched release (need ${ps#FAIL:})"
+  if [ $J_STATUS = FAIL ] || [ "$ps" != PASS ]; then
+    nf=$(brew_formula_of "$nb"); [ -n "$nf" ] && add_brew "$nf"
+  fi
   if [ $J_STATUS = FAIL ]; then
     fix="Upgrade Node to a patched release (${ps#FAIL:}; newer majors are fine). Temporary workaround: NODE_OPTIONS=--use-system-ca"
   elif [ "$ps" != PASS ] && [ $J_STATUS = PASS ]; then
@@ -866,7 +1009,9 @@ while IFS= read -r jh; do
   [ -n "$jv" ] || jv="unknown"
   jvn=$(echo "$jv" | sed -E 's/^1\.8\.0_([0-9]+).*/8.0.\1/; s/^1\.([0-9]+).*/\1/')
   bc=""
-  for f in "$jh/lib/security/blocked.certs" "$jh/jre/lib/security/blocked.certs"; do [ -f "$f" ] && bc="$f"; done
+  # JDK 16+ name it blocked.certs; JDK 8-15 blacklisted.certs (same format)
+  for f in "$jh/lib/security/blacklisted.certs" "$jh/jre/lib/security/blacklisted.certs" \
+           "$jh/lib/security/blocked.certs" "$jh/jre/lib/security/blocked.certs"; do [ -f "$f" ] && bc="$f"; done
   nb=0
   if [ -n "$bc" ]; then for s in $BAD_SHA256; do grep -qi "$s" "$bc" && nb=$((nb + 1)); done; fi
   ps=$(patched_status "$jvn" "$FIX_JAVA")
@@ -881,10 +1026,18 @@ while IFS= read -r jh; do
     if [ $nb -eq 16 ] || [ "$ps" = PASS ]; then J_STATUS=PASS; J_DETAIL="static check (no live test possible): patched version or all fingerprints blocked"
     else J_STATUS=FAIL; J_DETAIL="static check (no live test possible): version $jv not patched"; fi
   fi
-  J_DETAIL="$J_DETAIL; blocked.certs has $nb/16 fingerprints"
+  J_DETAIL="$J_DETAIL; $(basename "${bc:-blocked.certs}") has $nb/16 fingerprints"
   fix=""
   if [ $J_STATUS = FAIL ]; then
-    fix="Upgrade this JDK to a patched release (${ps#FAIL:}), or add the 16 SHA-256 fingerprints from impacted-intermediates.json to $jh/lib/security/blocked.certs. Do not delete roots from cacerts."
+    fix="Upgrade this JDK to a patched release (${ps#FAIL:}), or add the 16 SHA-256 fingerprints from impacted-intermediates.json to ${bc:-$jh/lib/security/blocked.certs}. Do not delete roots from cacerts."
+    jf=$(brew_formula_of "$jh/bin/java")
+    if [ -n "$jf" ]; then
+      add_brew "$jf"
+    elif [ -n "$bc" ]; then
+      js=1; [ -w "$bc" ] && js=0
+      add_fix $js "Block the 16 compromised certificates in $bc (backup kept)" \
+        "f='$bc'; [ -f \"\$f.pre-emudhra\" ] || cp -p \"\$f\" \"\$f.pre-emudhra\"; for h in $(echo $BAD_SHA256); do grep -qi \"\$h\" \"\$f\" || echo \"\$h\" >> \"\$f\"; done"
+    fi
   elif [ "$ps" != PASS ] && [ $J_STATUS = PASS ]; then
     J_DETAIL="$J_DETAIL; version $jv older than ${ps#FAIL:} but this JDK already rejects"
   fi
@@ -900,13 +1053,18 @@ step "Other tools with built-in CA lists" "Version check against the advisory's 
 
 # vcheck NAME BIN VERSION_CMD... ; compares to FIXVAR
 vcheck() {
-  local name="$1" fixv="$2" bin="$3" howfix="$4" v
+  local name="$1" fixv="$2" bin="$3" howfix="$4" autocmd="$5" v bf
   check_start
   if [ -z "$bin" ] || ! [ -x "$bin" ]; then record SKIP "$name" "not installed"; return; fi
   v=$(run_to 20 "$bin" --version 2>/dev/null </dev/null | head -1 | grep -oE '[0-9]+(\.[0-9]+)+' | head -1)
   if [ -z "$v" ]; then record WARN "$name ($bin)" "could not read version"; return; fi
   if ver_ge "$v" "$fixv"; then record PASS "$name $v ($bin)" "patched (>= $fixv)"
-  else record FAIL "$name $v ($bin)" "older than patched $fixv" "$howfix"; fi
+  else
+    record FAIL "$name $v ($bin)" "older than patched $fixv" "$howfix"
+    bf=$(brew_formula_of "$bin")
+    if [ -n "$bf" ]; then add_brew "$bf"
+    elif [ -n "$autocmd" ]; then add_fix 0 "Update $name" "\"$bin\" $autocmd"; fi
+  fi
 }
 firstbin() { local b; for b in "$@"; do [ -x "$b" ] && { echo "$b"; return; }; done; }
 
@@ -922,24 +1080,24 @@ elif [ -z "$bca" ]; then
 elif ver_ge "$bca" "$FIX_BREW_CA"; then
   record PASS "Homebrew ca-certificates $bca" "patched (>= $FIX_BREW_CA)"
 else
-  record FAIL "Homebrew ca-certificates $bca" "older than patched $FIX_BREW_CA" "brew update && brew upgrade ca-certificates"
+  record FAIL "Homebrew ca-certificates $bca" "older than patched $FIX_BREW_CA" "brew update && brew upgrade ca-certificates"; add_brew ca-certificates
 fi
 for p in $BREW_PREFIXES; do
   for f in "$p/etc/ca-certificates/cert.pem" "$p/etc/openssl@3/cert.pem" "$p/etc/openssl@1.1/cert.pem" "$p/etc/openssl/cert.pem"; do
     [ -f "$f" ] || continue
     check_start
     roots=$(bundle_roots "$f")
-    if [ -n "$roots" ]; then record FAIL "Homebrew bundle $f" "still contains: $roots" "brew update && brew upgrade ca-certificates && brew postinstall ca-certificates"
+    if [ -n "$roots" ]; then record FAIL "Homebrew bundle $f" "still contains: $roots" "brew update && brew upgrade ca-certificates && brew postinstall ca-certificates"; add_brew ca-certificates
     else record PASS "Homebrew bundle $f" "affected roots not present"; fi
   done
 done
 
-vcheck "uv" "$FIX_UV" "$(firstbin $(path_bins uv) $HOME/.local/bin/uv $HOME/.cargo/bin/uv)" "uv self update   (or: brew upgrade uv)"
-vcheck "pixi" "$FIX_PIXI" "$(firstbin $(path_bins pixi) $HOME/.pixi/bin/pixi)" "pixi self-update"
-vcheck "rustup" "$FIX_RUSTUP" "$(firstbin $(path_bins rustup) $HOME/.cargo/bin/rustup)" "rustup self update"
-vcheck "deno" "$FIX_DENO" "$(firstbin $(path_bins deno) $HOME/.deno/bin/deno)" "deno upgrade"
-vcheck "mise" "$FIX_MISE" "$(firstbin $(path_bins mise) $HOME/.local/bin/mise)" "mise self-update   (or: brew upgrade mise)"
-vcheck "Claude Code" "$FIX_CLAUDE" "$(firstbin $(path_bins claude) $HOME/.claude/local/claude $HOME/.local/bin/claude)" "claude update"
+vcheck "uv" "$FIX_UV" "$(firstbin $(path_bins uv) $HOME/.local/bin/uv $HOME/.cargo/bin/uv)" "uv self update   (or: brew upgrade uv)" "self update"
+vcheck "pixi" "$FIX_PIXI" "$(firstbin $(path_bins pixi) $HOME/.pixi/bin/pixi)" "pixi self-update" "self-update"
+vcheck "rustup" "$FIX_RUSTUP" "$(firstbin $(path_bins rustup) $HOME/.cargo/bin/rustup)" "rustup self update" "self update"
+vcheck "deno" "$FIX_DENO" "$(firstbin $(path_bins deno) $HOME/.deno/bin/deno)" "deno upgrade" "upgrade"
+vcheck "mise" "$FIX_MISE" "$(firstbin $(path_bins mise) $HOME/.local/bin/mise)" "mise self-update   (or: brew upgrade mise)" "self-update -y"
+vcheck "Claude Code" "$FIX_CLAUDE" "$(firstbin $(path_bins claude) $HOME/.claude/local/claude $HOME/.local/bin/claude)" "claude update" "update"
 
 check_start
 bunb=$(firstbin $(path_bins bun) $HOME/.bun/bin/bun)
@@ -1067,18 +1225,8 @@ check_start
 if [ $OPT_SCAN -eq 0 ]; then
   record SKIP "CA bundle scan" "skipped (--quick/--no-scan)"
 else
-  NAMES='( -name cacert.pem -o -name cert.pem -o -name ca-bundle.crt -o -name ca-bundle.pem -o -name ca-certificates.crt -o -name cacerts.pem -o -name tls-ca-bundle.pem -o -name ca-root-nss.crt )'
-  prune_nm='-name node_modules -prune -o'
-  [ $OPT_DEEP -eq 1 ] && prune_nm=""
-  out "    scanning home folder and tool folders (this can take a minute)..."
-  {
-    run_to 240 find "$HOME" -xdev \( -path "$HOME/Library" -o -path "$HOME/.Trash" -o -path "$HOME/.cache" \
-      -o -path "$HOME/Pictures" -o -path "$HOME/Movies" -o -path "$HOME/Music" -o -name .git \) -prune -o \
-      $prune_nm -type f $NAMES -print 2>/dev/null
-    for d in "$HOME/Library/Python" $BREW_PREFIXES /Library/Frameworks/Python.framework /opt/local /opt/anaconda3 /opt/miniconda3; do
-      [ -d "$d" ] && run_to 120 find "$d" \( -name .git -o -path "*/Homebrew/Library" \) -prune -o -type f $NAMES -print 2>/dev/null
-    done
-  } </dev/null | sort -u > "$TMP/bundles"
+  out "    (the scan started in the background at the beginning; waiting for it to finish...)"
+  wait $SCAN_PID 2>/dev/null
   nb_total=0; nb_bad=0; nb_clean=0
   while IFS= read -r f; do
     [ -n "$f" ] || continue
@@ -1088,11 +1236,14 @@ else
     if [ -n "$roots" ]; then
       nb_bad=$((nb_bad + 1))
       check_start
+      envp=$(echo "$f" | sed -E 's#/lib/python[0-9.]+/site-packages/.*##')
+      envpy=""; for c in "$envp/bin/python3" "$envp/bin/python"; do [ -z "$envpy" ] && [ -x "$c" ] && envpy="$c"; done
       case "$f" in
-        */pip/_vendor/certifi/*) fx="This is pip's vendored copy: upgrade pip in that environment (pip >= $FIX_PIP)." ;;
+        */pip/_vendor/certifi/*) fx="This is pip's vendored copy: upgrade pip in that environment (pip >= $FIX_PIP)."
+          [ -n "$envpy" ] && py_pip_fix "$envpy" "'pip>=$FIX_PIP'" ;;
         */site-packages/certifi/*)
-          envp=$(echo "$f" | sed -E 's#/lib/python[0-9.]+/site-packages/certifi/.*##')
-          fx="\"$envp/bin/python\" -m pip install --upgrade 'certifi>=$FIX_CERTIFI'   (delete the environment if unused)" ;;
+          fx="\"$envp/bin/python\" -m pip install --upgrade 'certifi>=$FIX_CERTIFI'   (delete the environment if unused)"
+          [ -n "$envpy" ] && py_pip_fix "$envpy" "'certifi>=$FIX_CERTIFI'" ;;
         */Cellar/*|*/homebrew/*) fx="brew update && brew upgrade" ;;
         *) fx="Update the software that ships this file (or ignore if unused)." ;;
       esac
@@ -1231,12 +1382,115 @@ else
     out "${C_PASS}RESULT: OK - no FAIL found.${C_OFF}"
   fi
 fi
+
+# Brew upgrades are one fix (run as you, never as root)
+if [ -n "$BREW_FORMULAS" ] && [ -n "$BREW_PREFIXES" ]; then
+  bb=""; for p in $BREW_PREFIXES; do [ -z "$bb" ] && bb="$p/bin/brew"; done
+  add_fix 0 "Homebrew: brew update && brew upgrade$BREW_FORMULAS" "HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK=1 \"$bb\" update && HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK=1 \"$bb\" upgrade$BREW_FORMULAS"
+fi
+
+if [ $FX_N -gt 0 ] && [ $OPT_FIX -eq 0 ]; then
+  out ""
+  out "${C_BOLD}$FX_N fix(es) can be applied automatically.${C_OFF} Run again with --fix to apply them (you will be asked first):"
+  out "  curl -fsSL https://raw.githubusercontent.com/wakumo/emudhra-check/main/emudhra-check.sh | bash -s -- --fix"
+  out "  (or: bash emudhra-check.sh --fix)"
+  i=0; while [ $i -lt $FX_N ]; do
+    sfx=""; [ "${FX_SUDO[$i]}" = 1 ] && sfx=" [admin password]"
+    out "    - ${FX_LABEL[$i]}$sfx"; i=$((i + 1))
+  done
+fi
+
+if [ $OPT_FIX -eq 1 ]; then
+  apply_fixes
+fi
+
 out "Full log (send this file if asked): $LOG"
 [ $n_fail -gt 0 ] && return 1
 return 0
 }
 
+# ---------------------------------------------------------------------------
+# apply_fixes : confirm, run the registered fixes, ask for a re-check
+# ---------------------------------------------------------------------------
+apply_fixes() {
+  local i ans need_sudo=0 sudo_ok=0 t0 t1 rc outf n_ok=0 n_bad=0 n_skip=0
+  out ""
+  out "${C_BOLD}================================ AUTO-FIX ===============================${C_OFF}"
+  if [ $FX_N -eq 0 ]; then
+    out "Nothing can be fixed automatically. Follow the 'What to do' list above."
+    return 0
+  fi
+  out "The following $FX_N fix(es) will be applied:"
+  i=0; while [ $i -lt $FX_N ]; do
+    [ "${FX_SUDO[$i]}" = 1 ] && need_sudo=1
+    out "  $((i + 1)). ${FX_LABEL[$i]}$([ "${FX_SUDO[$i]}" = 1 ] && echo ' [admin password]')"
+    logonly "       command: ${FX_CMD[$i]}"
+    i=$((i + 1))
+  done
+  out "Not fixed automatically (do these by hand): macOS/Safari updates, Electron apps, Docker images, Node installed with nvm/fnm/volta, settings that disable verification."
+  if [ $OPT_YES -eq 0 ]; then
+    if ! ( : </dev/tty ) 2>/dev/null; then
+      out "${C_WARN}No terminal to ask for confirmation. Re-run with --fix --yes to apply without asking.${C_OFF}"
+      return 0
+    fi
+    printf 'Apply these fixes now? [y/N] ' > /dev/tty
+    read -r ans </dev/tty
+    logonly "Apply these fixes now? [y/N] $ans"
+    case "$ans" in y|Y|yes|YES) ;; *) out "No changes made."; return 0 ;; esac
+  fi
+  if [ $need_sudo -eq 1 ]; then
+    if [ "$(id -u)" = 0 ]; then sudo_ok=1
+    else
+      out "Some fixes need your Mac admin password (sudo):"
+      if sudo -v </dev/tty 2>/dev/tty; then sudo_ok=1; else out "${C_WARN}sudo was not granted: admin fixes will be skipped.${C_OFF}"; fi
+    fi
+  fi
+  i=0
+  while [ $i -lt $FX_N ]; do
+    t0=$(now_ms); outf="$TMP/fix.$i"
+    if [ "${FX_SUDO[$i]}" = 1 ] && [ $sudo_ok -eq 0 ]; then
+      n_skip=$((n_skip + 1))
+      out "  [$(ts)] ${C_SKIP}[SKIP]${C_OFF} ${FX_LABEL[$i]} - needs admin password"
+      i=$((i + 1)); continue
+    fi
+    out "  [$(ts)] ${C_INFO}[....]${C_OFF} ${FX_LABEL[$i]}"
+    if [ "${FX_SUDO[$i]}" = 1 ] && [ "$(id -u)" != 0 ]; then
+      sudo /bin/bash -c "${FX_CMD[$i]}" > "$outf" 2>&1 </dev/null; rc=$?
+    elif echo "${FX_CMD[$i]}" | grep -q '/bin/brew"' && [ "$(id -u)" = 0 ]; then
+      echo "Homebrew must not run as root; run this script as your normal user." > "$outf"; rc=1
+    else
+      /bin/bash -c "${FX_CMD[$i]}" > "$outf" 2>&1 </dev/null; rc=$?
+    fi
+    t1=$(now_ms)
+    sed 's/^/       | /' "$outf" >> "$LOG"
+    if [ $rc -eq 0 ]; then
+      n_ok=$((n_ok + 1))
+      out "  [$(ts)] ${C_PASS}[DONE]${C_OFF} ${FX_LABEL[$i]}  ${C_SKIP}($(fmt_secs $((t1 - t0))))${C_OFF}"
+    else
+      n_bad=$((n_bad + 1))
+      out "  [$(ts)] ${C_FAIL}[FAILED]${C_OFF} ${FX_LABEL[$i]} (exit $rc)  ${C_SKIP}($(fmt_secs $((t1 - t0))))${C_OFF}"
+      tail -3 "$outf" | while IFS= read -r l; do out "           | $l"; done
+    fi
+    i=$((i + 1))
+  done
+  out "Auto-fix finished: $n_ok done, $n_bad failed, $n_skip skipped."
+  EMD_RERUN=1
+}
+
 # Everything is inside main() so the script also works when piped into bash
 # (curl ... | bash): stdin is closed for all commands it runs.
+EMD_RERUN=0
 main "$@" </dev/null
-exit $?
+rc=$?
+if [ "$EMD_RERUN" = 1 ]; then
+  # Run every check again (read-only) to verify the fixes.
+  set --
+  for a in "${EMD_ORIG[@]}"; do
+    case "$a" in --fix|--yes|-y) ;; *) set -- "$@" "$a" ;; esac
+  done
+  echo ""
+  echo "Re-checking after the fixes..."
+  main --after-fix "$@" </dev/null
+  rc=$?
+fi
+exit $rc
