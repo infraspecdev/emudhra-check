@@ -1,5 +1,7 @@
 # emudhra-check
 
+**English** | [Tiếng Việt](README.vi.md)
+
 A one-command check that tells you whether your Mac still trusts the compromised **eMudhra** certificate authorities. It also tells you exactly what to update.
 
 > **Background.** On 20 October 2026, the private keys of 8 eMudhra intermediate CA certificates were found to be compromised. Anyone holding those keys can impersonate any website to software that still trusts them. Browsers are already protected, but many other programs on a Mac keep their own copy of the trusted certificates: curl, git, Python, pip, Node.js, Java, Electron apps and Docker images. Those copies need their own updates. Full advisory: https://emudhra.we-have-a-problem.com/
@@ -29,16 +31,6 @@ A one-command check that tells you whether your Mac still trusts the compromised
 5. A log file is saved on your **Desktop** (`emudhra-check-<computer>-<date>.log`, plus `...-after-fix.log` after `--fix`). Send it to IT if they ask for it.
 
 Some items always need you: installing macOS/Safari updates, updating apps like Slack or VS Code, and rebuilding Docker images. Run the check again afterwards until you get `RESULT: OK`.
-
-### Hướng dẫn nhanh (Tiếng Việt)
-
-1. Mở **Terminal** (`⌘ Space` → gõ `Terminal` → Enter).
-2. Dán lệnh ở trên rồi bấm Enter, đợi khoảng 1 phút. Mặc định script **chỉ kiểm tra**, không sửa gì trên máy.
-3. Nếu thấy `RESULT: OK` thì không cần làm gì.
-4. Nếu thấy `RESULT: NOT OK`, có hai cách sửa:
-   - Chạy lại với `--fix` (lệnh ở bước 4 phía trên). Script liệt kê những gì nó sẽ sửa, hỏi `[y/N]`, có thể hỏi mật khẩu máy, sửa xong thì tự kiểm tra lại.
-   - Hoặc tự làm theo danh sách **What to do** ở cuối kết quả.
-5. Cập nhật macOS, cập nhật app (Slack, VS Code…) và rebuild Docker image thì phải tự làm. File log nằm trên Desktop, gửi cho IT khi được yêu cầu.
 
 ---
 
