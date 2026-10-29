@@ -4,7 +4,7 @@
 # compromise (October 2026) and, only if asked, fixes what it can.
 #
 #   Advisory : https://emudhra.we-have-a-problem.com/
-#   Source   : https://github.com/wakumo/emudhra-check
+#   Source   : https://github.com/infraspecdev/emudhra-check
 #
 # WHAT IT DOES
 #   Finds the HTTPS clients on this Mac (the macOS trust store, curl, git,
@@ -170,7 +170,7 @@ Options
   -h, --help        Show this help.
 
 Exit code: 0 = no FAIL, 1 = at least one FAIL, 2 = bad usage.
-Source and documentation: https://github.com/wakumo/emudhra-check
+Source and documentation: https://github.com/infraspecdev/emudhra-check
 EOF
 }
 
