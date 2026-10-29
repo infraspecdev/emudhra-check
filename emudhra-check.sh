@@ -56,7 +56,7 @@
 
 # The step and fix functions are called through the STEPS list and add_fix.
 # shellcheck disable=SC2329
-SCRIPT_VERSION="1.4.0 (2026-10-29)"
+SCRIPT_VERSION="1.5.0 (2026-10-29)"
 
 # ===========================================================================
 # Advisory data (from https://github.com/galadran/we-have-a-problem.com)
@@ -942,18 +942,32 @@ fix_uv_pip_upgrade() {
   "$1" pip install --python "$2" --upgrade "$3"
 }
 
-# fix_apple_pip_cert STDLIB_DIR : needs sudo. Makes Apple's built-in pip
-# (/usr/bin/python3) use /etc/ssl/cert.pem, by setting PIP_CERT in the stdlib
-# sitecustomize.py, as the advisory does. Unlike a per-user usercustomize.py,
-# this also covers virtualenvs created from /usr/bin/python3. If the stdlib is
-# inside Xcode.app, macOS may refuse ("Operation not permitted").
+# fix_apple_pip_cert STDLIB_DIR USER_SITE USER : needs sudo. Makes Apple's
+# built-in pip (/usr/bin/python3) use /etc/ssl/cert.pem, by setting PIP_CERT in
+# the stdlib sitecustomize.py, as the advisory does. Unlike a per-user
+# usercustomize.py, this also covers virtualenvs created from /usr/bin/python3.
+# If macOS refuses that change (the stdlib is inside Xcode.app: "Operation not
+# permitted"), it falls back to USER's own USER_SITE/usercustomize.py, written
+# as USER, which works for that user but not inside virtualenvs.
 # Undo: sudo sed -i '' '/PIP_CERT/d' STDLIB_DIR/sitecustomize.py
+#       (fallback: delete the PIP_CERT line from USER_SITE/usercustomize.py)
 fix_apple_pip_cert() {
-  local f="$1/sitecustomize.py"
-  [ -d "$1" ] || return 1
+  local f="$1/sitecustomize.py" u="$2/usercustomize.py"
+  local line='import os; os.environ.setdefault("PIP_CERT", "/etc/ssl/cert.pem")'
   grep -q PIP_CERT "$f" 2>/dev/null && return 0
-  echo 'import os; os.environ.setdefault("PIP_CERT", "/etc/ssl/cert.pem")' >> "$f" || return 1
-  chmod 644 "$f"
+  if [ -d "$1" ] && echo "$line" 2>/dev/null >> "$f" && chmod 644 "$f"; then
+    echo "PIP_CERT set in $f"
+    return 0
+  fi
+  echo "Could not change $f (macOS may protect it): using $u instead (works for $3, not inside virtualenvs)."
+  [ -n "$2" ] || return 1
+  if [ "$(id -u)" = 0 ] && [ -n "$3" ]; then
+    # the file belongs to the user, not to root
+    sudo -u "$3" /bin/sh -c 'mkdir -p "$1" && { grep -q PIP_CERT "$2" 2>/dev/null || echo "$3" >> "$2"; }' \
+      sh "$2" "$u" "$line"
+  else
+    mkdir -p "$2" && { grep -q PIP_CERT "$u" 2>/dev/null || echo "$line" >> "$u"; }
+  fi
 }
 
 # fix_pyorg_certificates COMMAND_FILE : runs "Install Certificates.command",
@@ -973,6 +987,41 @@ fix_java_blocked_certs() {
   for h in "${BAD_SHA256[@]}"; do
     grep -qi "$h" "$f" || echo "$h" >> "$f" || return 1
   done
+}
+
+# fix_bundle_remove_roots FILE MARKER_LINE... : needs sudo when FILE is not
+# writable. Removes from a PEM bundle every certificate that contains both lines
+# of a marker pair (the affected roots, see ROOT_L1/ROOT_L2), for bundles your
+# settings point to (SSL_CERT_FILE, REQUESTS_CA_BUNDLE, git sslCAInfo...).
+# Keeps the original as FILE.pre-emudhra, and refuses to write a bundle with no
+# certificate left.
+# Undo: cp -p FILE.pre-emudhra FILE
+fix_bundle_remove_roots() {
+  local f="$1" t n0 n1 rc=1; shift
+  [ -f "$f.pre-emudhra" ] || cp -p "$f" "$f.pre-emudhra" || return 1
+  t=$(mktemp) || return 1
+  awk -v m="$*" '
+    BEGIN { n = split(m, k, " ") }
+    /-----BEGIN CERTIFICATE-----/ { inb = 1; blk = ""; delete seen }
+    inb {
+      blk = blk $0 "\n"; l = $0; sub(/\r$/, "", l); seen[l] = 1
+      if ($0 ~ /-----END CERTIFICATE-----/) {
+        inb = 0; drop = 0
+        for (i = 1; i < n; i += 2) if ((k[i] in seen) && (k[i + 1] in seen)) drop = 1
+        if (!drop) printf "%s", blk
+      }
+      next
+    }
+    { print }' "$f" > "$t" || { rm -f "$t"; return 1; }
+  n0=$(grep -c 'BEGIN CERTIFICATE' "$f"); n1=$(grep -c 'BEGIN CERTIFICATE' "$t")
+  if [ "$n1" -lt "$n0" ] && [ "$n1" -gt 0 ]; then
+    cat "$t" > "$f"; rc=$?
+    echo "Removed $((n0 - n1)) affected root(s) from $f ($n1 certificates left)"
+  else
+    echo "$f not changed ($n0 certificates before, $n1 after)."
+  fi
+  rm -f "$t"
+  return "$rc"
 }
 
 # fix_self_update BIN ARGS... : a tool's own updater ("uv self update",
@@ -1623,7 +1672,7 @@ pip_probe() {
 
 # check_python_pip PYTHON VERSION PIP_VERSION PIP_CERT
 check_python_pip() {
-  local py="$1" pv="$2" pipv="$3" pipcert="$4" fix="" stdlib f
+  local py="$1" pv="$2" pipv="$3" pipcert="$4" fix="" stdlib usite f
   if [ "$pipv" = none ] || [ -z "$pipv" ]; then
     record SKIP "python $pv pip" "pip not installed for this interpreter"
     return
@@ -1647,11 +1696,15 @@ check_python_pip() {
       # As the advisory does: PIP_CERT in the stdlib sitecustomize.py, which also
       # covers virtualenvs created from /usr/bin/python3 (a per-user
       # usercustomize.py is not loaded inside virtualenvs). Inside Xcode.app,
-      # macOS may refuse the change ("Operation not permitted").
+      # macOS may refuse the change ("Operation not permitted"): the fix then
+      # falls back to the per-user usercustomize.py.
       stdlib=$(/usr/bin/python3 -c 'import sysconfig; print(sysconfig.get_path("stdlib"))' 2>/dev/null </dev/null)
+      usite=$(/usr/bin/python3 -c 'import site; print(site.getusersitepackages())' 2>/dev/null </dev/null)
+      [ -n "$usite" ] || usite="$HOME/Library/Python/$(echo "$pv" | cut -d. -f1-2)/lib/python/site-packages"
       fix="Built-in pip, and pip in virtualenvs made from /usr/bin/python3, use their own old copy of the roots. After the step 2 fix, point them at /etc/ssl/cert.pem (advisory, needs admin password):
 F=\"\$(/usr/bin/python3 -c 'import sysconfig; print(sysconfig.get_path(\"stdlib\"))')/sitecustomize.py\" && echo 'import os; os.environ.setdefault(\"PIP_CERT\", \"/etc/ssl/cert.pem\")' | sudo tee -a \"\$F\" > /dev/null && sudo chmod 644 \"\$F\""
-      [ -n "$stdlib" ] && add_fix 1 "Make Apple's pip (and virtualenvs made from /usr/bin/python3) use the fixed /etc/ssl/cert.pem (stdlib sitecustomize.py)" fix_apple_pip_cert "$stdlib"
+      [ -n "$stdlib" ] && add_fix 1 "Make Apple's pip (and virtualenvs made from /usr/bin/python3) use the fixed /etc/ssl/cert.pem (stdlib sitecustomize.py; your usercustomize.py if macOS blocks it)" \
+        fix_apple_pip_cert "$stdlib" "$usite" "$(id -un)"
     else
       fix="\"$py\" -m pip install --upgrade 'pip>=$FIX_PIP'"
       [ -n "$(brew_formula_of "$py")" ] && fix="\"$py\" -m pip install --upgrade --break-system-packages 'pip>=$FIX_PIP'"
@@ -1925,17 +1978,25 @@ check_docker_versions() {
   fi
 }
 
+# check_go : the Go version. A Homebrew Go is upgraded by the brew fix; a Go
+# from the go.dev installer (/usr/local/go) has to be reinstalled by hand.
 check_go() {
-  local gob gv ps; gob=$(find_bin go /usr/local/go/bin/go)
+  local gob gv ps bf fix; gob=$(find_bin go /usr/local/go/bin/go)
   if [ -z "$gob" ]; then record SKIP "go" "not installed"; return; fi
   gv=$("$gob" version 2>/dev/null </dev/null | awk '{print $3}' | sed 's/^go//')
   ps=$(patched_status "$gv" "$FIX_GO")
   if [ "$ps" = PASS ]; then
     record PASS "go $gv" "patched (>= $FIX_GO)"
-  else
-    record WARN "go $gv" "not a patched release (need ${ps#FAIL:}). Go programs on macOS use the system verifier, but binaries you build for Linux/Docker embed the old list." \
-      "Upgrade Go and rebuild binaries/images you ship."
+    return
   fi
+  bf=$(brew_formula_of "$gob")
+  if [ -n "$bf" ]; then
+    add_brew "$bf"
+    fix="brew upgrade $bf (--fix does it), then rebuild the binaries/images you ship."
+  else
+    fix="Install a patched Go from https://go.dev/dl/, then rebuild the binaries/images you ship."
+  fi
+  record WARN "go $gv" "not a patched release (need ${ps#FAIL:}). Go programs on macOS use the system verifier, but binaries you build for Linux/Docker embed the old list." "$fix"
 }
 
 check_perl_mozilla_ca() {
@@ -2032,8 +2093,12 @@ custom_bundle_settings() {
   fi
 }
 
+# check_custom_bundles : each CA bundle file a setting points to. One that still
+# contains affected roots gets an optional fix that removes them (optional: it
+# changes a file you chose, and removing AAA Certificate Services may break some
+# unaffected sites, as on the advisory).
 check_custom_bundles() {
-  local kv f roots
+  local kv f roots js
   custom_bundle_settings > "$EMD_TMP/cfiles"
   if [ ! -s "$EMD_TMP/cfiles" ]; then
     record PASS "Custom CA bundle settings" "none set (SSL_CERT_FILE, REQUESTS_CA_BUNDLE, CURL_CA_BUNDLE, NODE_EXTRA_CA_CERTS, GIT_SSL_CAINFO, PIP_CERT, git sslCAInfo, npm cafile)"
@@ -2045,7 +2110,11 @@ check_custom_bundles() {
     if [ ! -f "$f" ]; then record WARN "Custom CA bundle: $kv" "file not found"; continue; fi
     roots=$(bundle_roots "$f")
     if [ -n "$roots" ]; then
-      record FAIL "Custom CA bundle: $kv" "contains: $roots" "Replace it with an updated bundle, or remove the setting. Do not use bundles copied before 20 Oct 2026."
+      record FAIL "Custom CA bundle: $kv" "contains: $roots" "Replace it with an updated bundle, or remove the setting. Do not use bundles copied before 20 Oct 2026.
+Or run with --fix and accept the optional fix: it removes the affected roots from this file (backup kept)."
+      js=1; [ -w "$f" ] && js=0
+      add_optional_fix "$js" "Remove the affected roots from $f (set by ${kv%%=*}; backup kept; may break some unaffected sites)" \
+        fix_bundle_remove_roots "$f" "${ROOT_L1[0]}" "${ROOT_L2[0]}" "${ROOT_L1[1]}" "${ROOT_L2[1]}" "${ROOT_L1[2]}" "${ROOT_L2[2]}"
     else
       record PASS "Custom CA bundle: $kv" "affected roots not present"
     fi
