@@ -37,7 +37,7 @@
 #   rustup...), which download from their usual sources.
 #
 # Usage
-#   curl -fsSL https://raw.githubusercontent.com/wakumo/emudhra-check/main/emudhra-check.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/infraspecdev/emudhra-check/main/emudhra-check.sh | bash
 #   bash emudhra-check.sh --help
 #
 # Exit code: 0 = no FAIL, 1 = at least one FAIL, 2 = bad usage.
@@ -62,7 +62,7 @@ SCRIPT_VERSION="1.4.0 (2026-10-29)"
 # Advisory data (from https://github.com/galadran/we-have-a-problem.com)
 # ===========================================================================
 ADVISORY="https://emudhra.we-have-a-problem.com/"
-SCRIPT_URL="https://raw.githubusercontent.com/wakumo/emudhra-check/main/emudhra-check.sh"
+SCRIPT_URL="https://raw.githubusercontent.com/infraspecdev/emudhra-check/main/emudhra-check.sh"
 
 # The 12 test hosts. Each serves a leaf signed by one compromised intermediate.
 #   *-emudhra     : intermediate <- emSign Root TLS CA - G3 <- emSign ECC Root CA - G3
@@ -146,8 +146,8 @@ usage() {
 eMudhra CA compromise - Mac exposure check
 
 Usage
-  curl -fsSL https://raw.githubusercontent.com/wakumo/emudhra-check/main/emudhra-check.sh | bash
-  curl -fsSL https://raw.githubusercontent.com/wakumo/emudhra-check/main/emudhra-check.sh | bash -s -- --fix
+  curl -fsSL https://raw.githubusercontent.com/infraspecdev/emudhra-check/main/emudhra-check.sh | bash
+  curl -fsSL https://raw.githubusercontent.com/infraspecdev/emudhra-check/main/emudhra-check.sh | bash -s -- --fix
   bash emudhra-check.sh [options]
 
 Default: check only (dry-run). Changes nothing on this Mac.
