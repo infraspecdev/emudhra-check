@@ -12,7 +12,7 @@ A one-command check that tells you whether your Mac still trusts the compromised
 2. Paste this line and press Enter:
 
    ```bash
-   curl -fsSL https://raw.githubusercontent.com/wakumo/emudhra-check/main/emudhra-check.sh | bash
+   curl -fsSL https://raw.githubusercontent.com/infraspecdev/emudhra-check/main/emudhra-check.sh | bash
    ```
 
 3. Wait about 1 minute until you see `RESULT:`.
@@ -22,7 +22,7 @@ A one-command check that tells you whether your Mac still trusts the compromised
    - **Automatic.** Run it again with `--fix`. The script shows the list of fixes it can apply and asks `Apply these fixes now? [y/N]`. It may also ask for your Mac password (admin). Then it applies the fixes and checks everything again:
 
      ```bash
-     curl -fsSL https://raw.githubusercontent.com/wakumo/emudhra-check/main/emudhra-check.sh | bash -s -- --fix
+     curl -fsSL https://raw.githubusercontent.com/infraspecdev/emudhra-check/main/emudhra-check.sh | bash -s -- --fix
      ```
 
    - **By hand.** Follow the **What to do** list at the end of the output. Each line says what to update and how.
@@ -49,7 +49,7 @@ In check mode, fixes are only **suggested**. They are applied only when you run 
 Download it, read it, then run it:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/wakumo/emudhra-check/main/emudhra-check.sh -o emudhra-check.sh
+curl -fsSL https://raw.githubusercontent.com/infraspecdev/emudhra-check/main/emudhra-check.sh -o emudhra-check.sh
 less emudhra-check.sh            # read it
 bash emudhra-check.sh            # run it
 ```
@@ -148,7 +148,7 @@ The log file is plain text with every check on its own line (`[PASS]`, `[FAIL]`â
 ## Auto-fix mode (`--fix`)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/wakumo/emudhra-check/main/emudhra-check.sh | bash -s -- --fix
+curl -fsSL https://raw.githubusercontent.com/infraspecdev/emudhra-check/main/emudhra-check.sh | bash -s -- --fix
 ```
 
 1. All checks run first, the same as in check mode.
@@ -192,7 +192,7 @@ Every live test runs in parallel: all 14 test servers at once for each program, 
 ## Options
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/wakumo/emudhra-check/main/emudhra-check.sh | bash -s -- --quick
+curl -fsSL https://raw.githubusercontent.com/infraspecdev/emudhra-check/main/emudhra-check.sh | bash -s -- --quick
 ```
 
 | Option | What it does |
