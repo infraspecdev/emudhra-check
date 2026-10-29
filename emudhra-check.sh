@@ -9,7 +9,7 @@
 # WHAT IT DOES
 #   Finds the HTTPS clients on this Mac (the macOS trust store, curl, git,
 #   Python/pip, Node.js, Java) and makes each one connect to the advisory's
-#   12 TLS test hosts. A safe client refuses all 12 with a certificate error
+#   14 TLS test hosts. A safe client refuses all 14 with a certificate error
 #   and still connects to a normal site. It also compares tool versions with
 #   the advisory's "Who has patched?" table and looks for CA bundle files that
 #   still contain the affected root certificates.
@@ -22,7 +22,7 @@
 #   documents or browser data.
 #
 # WHAT IT CONNECTS TO
-#   Port 443 of the 12 *.we-have-a-problem.com test hosts, github.com and
+#   Port 443 of the 14 *.we-have-a-problem.com test hosts, github.com and
 #   pypi.org (normal sites), plus any --domain you pass. Nothing is uploaded:
 #   results stay in the terminal and in the log file.
 #
@@ -56,7 +56,7 @@
 
 # The step and fix functions are called through the STEPS list and add_fix.
 # shellcheck disable=SC2329
-SCRIPT_VERSION="1.3.0 (2026-10-22)"
+SCRIPT_VERSION="1.4.0 (2026-10-29)"
 
 # ===========================================================================
 # Advisory data (from https://github.com/galadran/we-have-a-problem.com)
@@ -74,6 +74,12 @@ ADVISORY_TEST_HOSTS=(
   dv-g3b-aaa-emudhra.we-have-a-problem.com ov-g3b-aaa-emudhra.we-have-a-problem.com
   ev-g3b-aaa-emudhra.we-have-a-problem.com dv-g3c-aaa-emudhra.we-have-a-problem.com
   ov-g3c-aaa-emudhra.we-have-a-problem.com ev-g3c-aaa-emudhra.we-have-a-problem.com
+)
+# The 2 "No CT" test hosts (added 22 Oct): their leaf was never logged to
+# Certificate Transparency, so CT-enforcing clients reject it even if they trust
+# the intermediate. Accepting one means the client can be attacked unnoticed.
+ADVISORY_NOCT_HOSTS=(
+  dv-g3b-noct-emudhra.we-have-a-problem.com dv-g3b-aaa-noct-emudhra.we-have-a-problem.com
 )
 # Normal sites that every client must still reach.
 ADVISORY_CONTROL_HOST="github.com"
@@ -116,7 +122,7 @@ BAD_CN_REGEX='EM (DV|OV|EV) TLS CA - G3[BC]|EM OV CS CA - G3[BC]'
 FIX_BREW_CA="2026-09-25_1"
 FIX_CERTIFI="2026.10.19"
 FIX_PIP="26.2.2"
-FIX_UV="0.13.4"
+FIX_UV="0.13.5"
 FIX_PIXI="0.82.1"
 FIX_RUSTUP="1.29.2"
 FIX_DENO="2.9.8"
@@ -126,7 +132,11 @@ FIX_PERL_MOZCA="20261020"
 FIX_NODE="22.23.4 24.22.1 26.12.1"            # one per release line; newer majors are fine
 FIX_GO="1.26.10 1.27.3"
 FIX_ELECTRON="42.11.16 43.8.1 44.9.1"
-FIX_JAVA="8.0.511 11.0.33 17.0.21 21.0.13 25.0.5 27.0.1"
+FIX_JAVA="8.0.511 11.0.33 17.0.21 21.0.13 25.0.5 27.0.1"   # Oracle JDK only; OpenJDK is pending
+FIX_BUN="1.4.4"
+FIX_GH="2.102.1"
+FIX_DOCKER="29.9.2"                            # Docker CLI and Docker Engine
+FIX_DOCKER_DESKTOP="4.96.2"
 # ===========================================================================
 # Options, run state, temporary folder
 # ===========================================================================
@@ -146,6 +156,9 @@ Options
   --fix             After the checks, list the automatic fixes, ask once, apply
                     them (asks for your password if a fix needs it), re-check.
   --yes             With --fix: do not ask for confirmation (for MDM/scripts).
+                    Optional fixes are then skipped unless --with-optional.
+  --with-optional   With --fix: also apply the optional fixes without asking
+                    (removing AAA Certificate Services from /etc/ssl/cert.pem).
   --quick           Skip the slow steps (macOS update check, disk scan, Docker).
   --no-scan         Skip the CA bundle file scan of the home folder.
   --no-docker       Skip the Docker image check.
@@ -163,7 +176,7 @@ EOF
 
 # parse_options ARGS... : sets the OPT_* variables; returns 1 on a bad option
 parse_options() {
-  OPT_FIX=0; OPT_YES=0; OPT_AFTER_FIX=0; OPT_HELP=0
+  OPT_FIX=0; OPT_YES=0; OPT_OPTIONAL=0; OPT_AFTER_FIX=0; OPT_HELP=0
   OPT_QUICK=0; OPT_SCAN=1; OPT_DOCKER=1; OPT_DEEP=0
   OPT_DOMAINS=""; OPT_LOG=""; OPT_COLOR=1
   while [ $# -gt 0 ]; do
@@ -171,6 +184,7 @@ parse_options() {
       --fix) OPT_FIX=1 ;;
       --check|--dry-run) OPT_FIX=0 ;;
       --yes|-y) OPT_YES=1 ;;
+      --with-optional) OPT_OPTIONAL=1 ;;
       --after-fix) OPT_AFTER_FIX=1 ;;           # internal: the re-check after --fix
       --quick) OPT_QUICK=1; OPT_SCAN=0; OPT_DOCKER=0 ;;
       --no-scan) OPT_SCAN=0 ;;
@@ -198,10 +212,11 @@ init_state() {
   fi
   CONTROL_HOST="${EMD_CONTROL_HOST:-$ADVISORY_CONTROL_HOST}"
   PIP_CONTROL_HOST="${EMD_CONTROL_HOST:-$ADVISORY_PIP_CONTROL_HOST}"
+  # pip is slow: one test host per root path (the first is direct, the last cross-signed)
+  PIP_HOSTS=("${TEST_HOSTS[0]}" "${TEST_HOSTS[$((${#TEST_HOSTS[@]} - 1))]}")
+  [ -z "$EMD_TEST_HOSTS" ] && TEST_HOSTS+=("${ADVISORY_NOCT_HOSTS[@]}")
   N_TEST=${#TEST_HOSTS[@]}
   ALL_HOSTS=("${TEST_HOSTS[@]}" "$CONTROL_HOST")
-  # pip is slow: one test host per root path (the first is direct, the last cross-signed)
-  PIP_HOSTS=("${TEST_HOSTS[0]}" "${TEST_HOSTS[$((N_TEST - 1))]}")
 
   # Results, one entry per check (bash 3.2 on macOS: indexed arrays only)
   R_N=0; R_STATUS=(); R_STEP=(); R_NAME=(); R_SECS=(); R_FIX=()
@@ -209,7 +224,7 @@ init_state() {
   CUR_STEP_NO=0; TOTAL_STEPS=${#STEPS[@]}; STEP_TITLE=(); STEP_SECS=()
 
   # Fixes registered by the checks (see "Automatic fixes")
-  FX_N=0; FX_SUDO=(); FX_LABEL=(); FX_ARGS=(); BREW_FORMULAS=""; PYFIX_SEEN=""
+  FX_N=0; FX_SUDO=(); FX_LABEL=(); FX_ARGS=(); FX_OPT=(); BREW_FORMULAS=""; PYFIX_SEEN=""
   EMD_RERUN=0
 
   # Facts from step 2 that later steps use
@@ -801,6 +816,9 @@ judge() {
     J_STATUS=WARN; J_DETAIL="no result (client did not run)"
   elif [ "$acc" -gt 0 ]; then
     J_STATUS=FAIL; J_DETAIL="TRUSTS $acc/$n_test compromised test chains:$acc_list"
+    case "$acc_list" in
+      *-noct-*) J_DETAIL="$J_DETAIL (accepts chains never logged to CT: can be attacked unnoticed)" ;;
+    esac
   elif [ "$rej" -eq "$n_test" ]; then
     if [ "$ctrl" = ACCEPT ] || [ -z "$ctrl" ]; then
       J_STATUS=PASS; J_DETAIL="rejected $rej/$n_test test chains; $ctrl_txt"
@@ -843,25 +861,29 @@ apple_fix() {
 # below. A check only *registers* a fix with add_fix. Nothing runs unless the
 # script was started with --fix, and then only after the list was shown and
 # the user answered "y" (or passed --yes). Each fix runs in a fresh bash with
-# no stdin, as the user, or with sudo for the two marked "needs sudo"; its
-# output goes to the log.
+# no stdin, as the user, or with sudo for the ones marked "needs sudo"; its
+# output goes to the log. Optional fixes (add_optional_fix) are asked about
+# one by one, and skipped with --yes unless --with-optional.
 
 # ---------------------------------------------------------------------------
 # The fixes
 # ---------------------------------------------------------------------------
 
-# fix_certpem : needs sudo. The advisory's workaround for /etc/ssl/cert.pem
-# (used by Apple's curl, git, python3, perl, ruby, openssl): remove the "AAA
-# Certificate Services" and "emSign ECC Root CA - G3" roots. Keeps the original
-# as /etc/ssl/cert.pem.pre-emudhra, and refuses to write a result with fewer
-# than 50 certificates. macOS updates may restore the file.
+# fix_certpem CN : needs sudo. The advisory's workaround for /etc/ssl/cert.pem
+# (used by Apple's curl, git, python3, perl, ruby, openssl): remove the root
+# whose subject ends in /CN=CN ("emSign ECC Root CA - G3", or, optionally,
+# "AAA Certificate Services"). Keeps the original as
+# /etc/ssl/cert.pem.pre-emudhra (the first time only), and refuses to write a
+# result with fewer than 50 certificates. macOS updates may restore the file
+# (macOS 27.2 did).
 # Undo: sudo cp -p /etc/ssl/cert.pem.pre-emudhra /etc/ssl/cert.pem
 fix_certpem() {
   local f=/etc/ssl/cert.pem b=/etc/ssl/cert.pem.pre-emudhra rc=1
   [ -f "$b" ] || cp -p "$f" "$b" || return 1
-  awk '/^(###|===) / { skip = 0 }
-       /^=== .*\/CN=(AAA Certificate Services|emSign ECC Root CA - G3)$/ { skip = 1 }
-       !skip' "$b" > "$f.new" || return 1
+  # filters the current file, so the two fixes can run one after the other
+  awk -v m="/CN=$1" '/^(###|===) / { skip = 0 }
+       /^=== / && substr($0, length($0) - length(m) + 1) == m { skip = 1 }
+       !skip' "$f" > "$f.new" || return 1
   if [ "$(grep -c 'BEGIN CERTIFICATE' "$f.new")" -ge 50 ]; then
     cat "$f.new" > "$f"; rc=$?
   else
@@ -920,16 +942,18 @@ fix_uv_pip_upgrade() {
   "$1" pip install --python "$2" --upgrade "$3"
 }
 
-# fix_apple_pip_cert SITE_DIR : makes Apple's built-in pip (/usr/bin/python3)
-# use /etc/ssl/cert.pem, by setting PIP_CERT in your own usercustomize.py
-# (the advisory sets it in Apple's sitecustomize.py, which needs sudo and
-# which macOS often protects). Only for your user.
-# Undo: delete the PIP_CERT line from SITE_DIR/usercustomize.py
+# fix_apple_pip_cert STDLIB_DIR : needs sudo. Makes Apple's built-in pip
+# (/usr/bin/python3) use /etc/ssl/cert.pem, by setting PIP_CERT in the stdlib
+# sitecustomize.py, as the advisory does. Unlike a per-user usercustomize.py,
+# this also covers virtualenvs created from /usr/bin/python3. If the stdlib is
+# inside Xcode.app, macOS may refuse ("Operation not permitted").
+# Undo: sudo sed -i '' '/PIP_CERT/d' STDLIB_DIR/sitecustomize.py
 fix_apple_pip_cert() {
-  local f="$1/usercustomize.py"
-  mkdir -p "$1" || return 1
+  local f="$1/sitecustomize.py"
+  [ -d "$1" ] || return 1
   grep -q PIP_CERT "$f" 2>/dev/null && return 0
-  echo 'import os; os.environ.setdefault("PIP_CERT", "/etc/ssl/cert.pem")' >> "$f"
+  echo 'import os; os.environ.setdefault("PIP_CERT", "/etc/ssl/cert.pem")' >> "$f" || return 1
+  chmod 644 "$f"
 }
 
 # fix_pyorg_certificates COMMAND_FILE : runs "Install Certificates.command",
@@ -985,8 +1009,17 @@ add_fix() {
   local sudo=$1 label=$2 key a i=0; shift 2
   key=""; for a in "$@"; do key="$key${key:+$FX_SEP}$a"; done
   while [ "$i" -lt "$FX_N" ]; do [ "${FX_ARGS[$i]}" = "$key" ] && return 0; i=$((i + 1)); done
-  FX_SUDO+=("$sudo"); FX_LABEL+=("$label"); FX_ARGS+=("$key")
+  FX_SUDO+=("$sudo"); FX_LABEL+=("$label"); FX_ARGS+=("$key"); FX_OPT+=(0)
   FX_N=${#FX_ARGS[@]}
+}
+
+# add_optional_fix NEEDS_SUDO "label" FIX_FUNCTION [ARGS...] : like add_fix, but
+# --fix asks about it on its own (it may have side effects)
+add_optional_fix() {
+  local n=$FX_N
+  add_fix "$@"
+  [ "$FX_N" -gt "$n" ] && FX_OPT[$((FX_N - 1))]=1
+  return 0
 }
 
 # add_brew FORMULA : collected into one "brew upgrade" fix (register_brew_fix)
@@ -1087,7 +1120,7 @@ fx_progress() {
 
 # offer_fixes : check mode: list the fixes --fix would apply
 offer_fixes() {
-  local i sfx w
+  local i sfx w opt
   [ "$FX_N" -gt 0 ] || return 0
   plain ""
   plain "$FX_N fix(es) can be applied automatically. Run again with --fix to apply them (you will be asked first):"
@@ -1098,19 +1131,20 @@ offer_fixes() {
   i=0
   while [ "$i" -lt "$FX_N" ]; do
     sfx=""; [ "${FX_SUDO[$i]}" = 1 ] && sfx=" [admin password]"
-    plain "    - ${FX_LABEL[$i]}$sfx"
-    w=$((TERM_W - 7)); [ -n "$sfx" ] && w=$((w - 18))
-    scr "   🔧 $(fitm "$(tilde "${FX_LABEL[$i]}")" $w)${sfx:+ ${C_WARN}🔑 admin password${C_OFF}}"
+    opt=""; [ "${FX_OPT[$i]}" = 1 ] && opt="[optional] "
+    plain "    - $opt${FX_LABEL[$i]}$sfx"
+    w=$((TERM_W - 7 - ${#opt})); [ -n "$sfx" ] && w=$((w - 18))
+    scr "   🔧 ${opt:+$C_WARN$opt$C_OFF}$(fitm "$(tilde "${FX_LABEL[$i]}")" $w)${sfx:+ ${C_WARN}🔑 admin password${C_OFF}}"
     i=$((i + 1))
   done
   scr ""
-  scr "  Apply them (you will be asked first):"
+  scr "  Apply them (you will be asked first; optional fixes are asked about one by one):"
   scr "  ${C_BOLD}curl -fsSL $SCRIPT_URL | bash -s -- --fix${C_OFF}"
 }
 
 # apply_fixes : --fix: show the list, confirm, run each fix, ask for a re-check
 apply_fixes() {
-  local i ans need_sudo=0 sudo_ok=0 t0 t1 rc outf n_ok=0 n_bad=0 n_skip=0 pw l
+  local i ans need_sudo=0 sudo_ok=0 t0 t1 rc outf n_ok=0 n_bad=0 n_skip=0 pw opt l go=()
   plain ""
   plain "================================ AUTO-FIX ==============================="
   scr ""
@@ -1123,13 +1157,14 @@ apply_fixes() {
   out "The following $FX_N fix(es) will be applied:"
   i=0
   while [ "$i" -lt "$FX_N" ]; do
-    pw=""; [ "${FX_SUDO[$i]}" = 1 ] && { need_sudo=1; pw=1; }
-    plain "  $((i + 1)). ${FX_LABEL[$i]}${pw:+ [admin password]}"
-    scr "  ${C_BOLD}$(printf '%2d' $((i + 1))).${C_OFF} $(tilde "${FX_LABEL[$i]}")${pw:+ ${C_WARN}🔑 admin password${C_OFF}}"
+    pw=""; [ "${FX_SUDO[$i]}" = 1 ] && pw=1
+    opt=""; [ "${FX_OPT[$i]}" = 1 ] && opt="[optional] "
+    plain "  $((i + 1)). $opt${FX_LABEL[$i]}${pw:+ [admin password]}"
+    scr "  ${C_BOLD}$(printf '%2d' $((i + 1))).${C_OFF} ${opt:+$C_WARN$opt$C_OFF}$(tilde "${FX_LABEL[$i]}")${pw:+ ${C_WARN}🔑 admin password${C_OFF}}"
     logonly "       runs: $(fx_text $i)"
     i=$((i + 1))
   done
-  out "Not fixed automatically (do these by hand): macOS/Safari updates, Electron apps, Docker images, Node installed with nvm/fnm/volta, settings that disable verification."
+  out "Not fixed automatically (do these by hand): macOS/Safari updates, Electron apps, Docker Desktop and images, Node installed with nvm/fnm/volta, settings that disable verification."
 
   if [ "$OPT_YES" -eq 0 ]; then
     if ! ( : </dev/tty ) 2>/dev/null; then
@@ -1141,6 +1176,24 @@ apply_fixes() {
     logonly "Apply these fixes now? [y/N] $ans"
     case "$ans" in y|Y|yes|YES) ;; *) out "No changes made."; return 0 ;; esac
   fi
+
+  # optional fixes: asked one by one; with --yes only applied with --with-optional
+  i=0
+  while [ "$i" -lt "$FX_N" ]; do
+    go[i]=1
+    if [ "${FX_OPT[$i]}" = 1 ] && [ "$OPT_OPTIONAL" -eq 0 ]; then
+      go[i]=0
+      if [ "$OPT_YES" -eq 0 ]; then
+        printf 'Also apply optional fix %d (%s)? [y/N] ' $((i + 1)) "${FX_LABEL[$i]}" > /dev/tty
+        read -r ans </dev/tty
+        logonly "Also apply optional fix $((i + 1))? [y/N] $ans"
+        case "$ans" in y|Y|yes|YES) go[i]=1 ;; esac
+      fi
+    fi
+    [ "${go[$i]}" = 1 ] && [ "${FX_SUDO[$i]}" = 1 ] && need_sudo=1
+    i=$((i + 1))
+  done
+
   if [ "$need_sudo" -eq 1 ]; then
     if [ "$(id -u)" = 0 ]; then sudo_ok=1
     else
@@ -1154,6 +1207,11 @@ apply_fixes() {
   while [ "$i" -lt "$FX_N" ]; do
     t0=$(now_ms); outf="$EMD_TMP/fix.$i"
     fx_words $i
+    if [ "${go[$i]}" != 1 ]; then
+      n_skip=$((n_skip + 1))
+      fx_progress SKIP "${FX_LABEL[$i]} - optional, not chosen" ""
+      i=$((i + 1)); continue
+    fi
     if [ "${FX_SUDO[$i]}" = 1 ] && [ "$sudo_ok" -eq 0 ]; then
       n_skip=$((n_skip + 1))
       fx_progress SKIP "${FX_LABEL[$i]} - needs admin password" ""
@@ -1216,7 +1274,7 @@ step_connectivity() {
 # Step 2: macOS updates, Keychain, /etc/ssl/cert.pem, the macOS trust store
 # ===========================================================================
 step_macos() {
-  step "macOS system trust" "Safari and native apps use the macOS trust store; Apple blocked the intermediates on 19 Oct 2026."
+  step "macOS system trust" "Safari and native apps use the macOS trust store; Apple blocked the intermediates on 22 Oct 2026."
   check_software_updates
   check_start; check_keychain
   check_start; check_certpem
@@ -1242,7 +1300,8 @@ check_software_updates() {
     record PASS "macOS software updates" "$OS_NAME $OS_VER is up to date"
   elif [ -n "$SWU_IMPORTANT" ]; then
     record FAIL "macOS software updates" "updates available: $SWU_IMPORTANT${others:+ (also: $others)}" \
-      "Install them: System Settings > General > Software Update, then restart."
+      "Install them: System Settings > General > Software Update, then restart.
+macOS updates up to 27.2 do not fix Apple's curl/git/python3 and may undo the /etc/ssl/cert.pem fix: run this script again after updating."
   elif [ -n "$others" ]; then
     record INFO "macOS software updates" "macOS and Safari are up to date; other updates available: $others"
   else
@@ -1289,9 +1348,12 @@ check_keychain() {
   fi
 }
 
-# check_certpem : /etc/ssl/cert.pem, the bundle of Apple's OpenSSL/LibreSSL tools
+# check_certpem : /etc/ssl/cert.pem, the bundle of Apple's OpenSSL/LibreSSL tools.
+# The emSign roots are always removed by --fix; removing AAA Certificate Services
+# (the Sectigo cross-signs) is optional, as on the advisory, because unaffected
+# sites still chain to it.
 check_certpem() {
-  local roots
+  local roots st=FAIL
   if [ ! -f /etc/ssl/cert.pem ]; then record SKIP "/etc/ssl/cert.pem" "file not found"; return; fi
   roots=$(bundle_roots /etc/ssl/cert.pem)
   if [ -z "$roots" ]; then
@@ -1299,10 +1361,25 @@ check_certpem() {
     record PASS "/etc/ssl/cert.pem" "does not contain the affected roots ($(cert_count /etc/ssl/cert.pem) certificates)"
     return
   fi
-  add_fix 1 "Remove the affected roots from /etc/ssl/cert.pem (advisory workaround, backup kept)" fix_certpem
-  record FAIL "/etc/ssl/cert.pem" "still contains: $roots. Used by Apple's built-in curl, git, python3, perl, ruby, openssl." \
-"Advisory workaround (needs admin password; macOS updates may restore the file):
-sudo cp -p /etc/ssl/cert.pem /etc/ssl/cert.pem.bak && sudo awk '/^(###|===) /{skip=0} /^=== .*\\/CN=(AAA Certificate Services|emSign ECC Root CA - G3)\$/{skip=1} !skip' /etc/ssl/cert.pem.bak | sudo tee /etc/ssl/cert.pem > /dev/null"
+  case "$roots" in *"emSign ECC Root CA - G3"*)
+    add_fix 1 "Remove emSign ECC Root CA - G3 from /etc/ssl/cert.pem (advisory workaround, backup kept)" \
+      fix_certpem "emSign ECC Root CA - G3" ;;
+  esac
+  case "$roots" in *"emSign Root TLS CA - G3"*)
+    add_fix 1 "Remove emSign Root TLS CA - G3 from /etc/ssl/cert.pem (backup kept)" fix_certpem "emSign Root TLS CA - G3" ;;
+  esac
+  case "$roots" in *"AAA Certificate Services"*)
+    add_optional_fix 1 "Remove AAA Certificate Services from /etc/ssl/cert.pem (blocks the Sectigo cross-signed chains; may break some unaffected sites)" \
+      fix_certpem "AAA Certificate Services" ;;
+  esac
+  # only AAA left: the user chose to keep it (the aaa test chains still FAIL in steps 3-5)
+  [ "$roots" = "AAA Certificate Services" ] && st=WARN
+  record "$st" "/etc/ssl/cert.pem" "still contains: $roots. Used by Apple's built-in curl, git, python3, perl, ruby, openssl. macOS 27.2 does not fix this file and undoes the workaround." \
+"Advisory workaround (needs admin password; repeat after every macOS update):
+[ -e /etc/ssl/cert.pem.orig ] || sudo cp -p /etc/ssl/cert.pem /etc/ssl/cert.pem.orig
+t=\$(mktemp) && awk -v s='=== /C=IN/OU=emSign PKI/O=eMudhra Technologies Limited/CN=emSign ECC Root CA - G3' '/^(===|###) /{skip=0} \$0==s{skip=1} !skip' /etc/ssl/cert.pem > \"\$t\" && [ -s \"\$t\" ] && sudo install -m 0644 -o root -g wheel \"\$t\" /etc/ssl/cert.pem; rm -f \"\$t\"
+Optional, also blocks the Sectigo cross-signed chains but may break some unaffected sites: the same with
+s='=== /C=GB/ST=Greater Manchester/L=Salford/O=Comodo CA Limited/CN=AAA Certificate Services'"
 }
 
 # check_macos_trust_store : live test through Foundation (check_mac.js).
@@ -1351,7 +1428,7 @@ check_browsers() {
   if [ -n "$br" ] && echo "$SWU_IMPORTANT" | grep -qi safari; then
     record WARN "Browsers" "${br# } - a Safari update is waiting" "Install the Safari update (System Settings > General > Software Update), then restart Safari."
   elif [ -n "$br" ]; then
-    record INFO "Browsers" "${br# } (blocked via CRLSets/OneCRL/Apple since 17-19 Oct; just keep them updated and restart)"
+    record INFO "Browsers" "${br# } (blocked via CRLSets/OneCRL since 17 Oct, Apple since 22 Oct; just keep them updated and restart)"
   else
     record SKIP "Browsers" "none found in /Applications"
   fi
@@ -1546,7 +1623,7 @@ pip_probe() {
 
 # check_python_pip PYTHON VERSION PIP_VERSION PIP_CERT
 check_python_pip() {
-  local py="$1" pv="$2" pipv="$3" pipcert="$4" fix="" usite f
+  local py="$1" pv="$2" pipv="$3" pipcert="$4" fix="" stdlib f
   if [ "$pipv" = none ] || [ -z "$pipv" ]; then
     record SKIP "python $pv pip" "pip not installed for this interpreter"
     return
@@ -1567,15 +1644,14 @@ check_python_pip() {
       f=$(brew_formula_of "$py")
       fix="Python $pv is end-of-life and the patched pip needs Python 3.10+. Remove it if unused${f:+ (brew uninstall $f)}, or run its pip with --cert /etc/ssl/cert.pem (after the step 2 fix)."
     elif [ "$py" = /usr/bin/python3 ]; then
-      # The advisory puts PIP_CERT in the stdlib sitecustomize.py, but that file
-      # lives inside Xcode.app / CommandLineTools, which macOS often refuses to
-      # change ("Operation not permitted"). The per-user usercustomize.py does
-      # the same for this user, without sudo.
-      usite=$(/usr/bin/python3 -c 'import site; print(site.getusersitepackages())' 2>/dev/null </dev/null)
-      [ -n "$usite" ] || usite="$HOME/Library/Python/$(echo "$pv" | cut -d. -f1-2)/lib/python/site-packages"
-      fix="Built-in pip uses its own old copy of the roots. After the step 2 fix, point it at /etc/ssl/cert.pem (no sudo needed):
-mkdir -p \"$usite\" && echo 'import os; os.environ.setdefault(\"PIP_CERT\", \"/etc/ssl/cert.pem\")' >> \"$usite/usercustomize.py\""
-      add_fix 0 "Make Apple's pip use the fixed /etc/ssl/cert.pem (usercustomize.py for your user)" fix_apple_pip_cert "$usite"
+      # As the advisory does: PIP_CERT in the stdlib sitecustomize.py, which also
+      # covers virtualenvs created from /usr/bin/python3 (a per-user
+      # usercustomize.py is not loaded inside virtualenvs). Inside Xcode.app,
+      # macOS may refuse the change ("Operation not permitted").
+      stdlib=$(/usr/bin/python3 -c 'import sysconfig; print(sysconfig.get_path("stdlib"))' 2>/dev/null </dev/null)
+      fix="Built-in pip, and pip in virtualenvs made from /usr/bin/python3, use their own old copy of the roots. After the step 2 fix, point them at /etc/ssl/cert.pem (advisory, needs admin password):
+F=\"\$(/usr/bin/python3 -c 'import sysconfig; print(sysconfig.get_path(\"stdlib\"))')/sitecustomize.py\" && echo 'import os; os.environ.setdefault(\"PIP_CERT\", \"/etc/ssl/cert.pem\")' | sudo tee -a \"\$F\" > /dev/null && sudo chmod 644 \"\$F\""
+      [ -n "$stdlib" ] && add_fix 1 "Make Apple's pip (and virtualenvs made from /usr/bin/python3) use the fixed /etc/ssl/cert.pem (stdlib sitecustomize.py)" fix_apple_pip_cert "$stdlib"
     else
       fix="\"$py\" -m pip install --upgrade 'pip>=$FIX_PIP'"
       [ -n "$(brew_formula_of "$py")" ] && fix="\"$py\" -m pip install --upgrade --break-system-packages 'pip>=$FIX_PIP'"
@@ -1678,17 +1754,21 @@ java_homes() {
 }
 
 # check_java JAVA_HOME : live test with EmudhraCheck.java (Java 11+),
-# else a static check of the version and of blocked.certs
+# else a static check of the version and of blocked.certs. Only Oracle JDK
+# builds have a patched release; OpenJDK builds are still pending.
 check_java() {
-  local jh="$1" jv jvn bc="" f s nb=0 ps fix="" jf japp js
-  jv=$("$jh/bin/java" -version 2>&1 </dev/null | grep -m1 ' version "' | sed -E 's/.*version "([^"]*)".*/\1/')
+  local jh="$1" jout jv jvn bc="" f s nb=0 ps fix="" jf japp js oracle=0
+  jout=$("$jh/bin/java" -version 2>&1 </dev/null)
+  jv=$(echo "$jout" | grep -m1 ' version "' | sed -E 's/.*version "([^"]*)".*/\1/')
   [ -n "$jv" ] || jv="unknown"
   jvn=$(echo "$jv" | sed -E 's/^1\.8\.0_([0-9]+).*/8.0.\1/; s/^1\.([0-9]+).*/\1/')
+  echo "$jout" | grep -q 'Java(TM)' && oracle=1
   # JDK 16+ call it blocked.certs; JDK 8-15 blacklisted.certs (same format)
   for f in "$jh/lib/security/blacklisted.certs" "$jh/jre/lib/security/blacklisted.certs" \
            "$jh/lib/security/blocked.certs" "$jh/jre/lib/security/blocked.certs"; do [ -f "$f" ] && bc="$f"; done
   if [ -n "$bc" ]; then for s in "${BAD_SHA256[@]}"; do grep -qi "$s" "$bc" && nb=$((nb + 1)); done; fi
-  ps=$(patched_status "$jvn" "$FIX_JAVA")
+  if [ "$oracle" -eq 1 ]; then ps=$(patched_status "$jvn" "$FIX_JAVA")
+  else ps="FAIL:pending"; fi                    # no patched OpenJDK release yet
   : > "$EMD_TMP/res"
   if [ "$(major "$jvn")" -ge 11 ]; then
     run_to 120 "$jh/bin/java" "$EMD_TMP/EmudhraCheck.java" "${ALL_HOSTS[@]}" > "$EMD_TMP/res" 2>"$EMD_TMP/java.err" </dev/null
@@ -1700,6 +1780,7 @@ check_java() {
     J_STATUS=PASS; J_DETAIL="static check (no live test possible): patched version or all fingerprints blocked"
   else
     J_STATUS=FAIL; J_DETAIL="static check (no live test possible): version $jv not patched"
+    [ "$oracle" -eq 0 ] && J_DETAIL="static check (no live test possible): OpenJDK $jv, no patched OpenJDK release yet"
   fi
   J_DETAIL="$J_DETAIL; $(basename "${bc:-blocked.certs}") has $nb/16 fingerprints"
 
@@ -1714,6 +1795,8 @@ check_java() {
       *)
         if [ "$ps" = PASS ]; then
           fix="Version $jv is a patched release, but this JDK still trusts the test chains. Add the 16 SHA-256 fingerprints from impacted-intermediates.json to ${bc:-$jh/lib/security/blocked.certs}. Do not delete roots from cacerts."
+        elif [ "$oracle" -eq 0 ]; then
+          fix="No patched OpenJDK release yet (advisory: pending). Add the 16 SHA-256 fingerprints from impacted-intermediates.json to ${bc:-$jh/lib/security/blocked.certs} (--fix does it), or use a patched Oracle JDK. Do not delete roots from cacerts."
         else
           fix="Upgrade this JDK to a patched release (${ps#FAIL:}), or add the 16 SHA-256 fingerprints from impacted-intermediates.json to ${bc:-$jh/lib/security/blocked.certs}. Do not delete roots from cacerts."
         fi ;;
@@ -1721,7 +1804,7 @@ check_java() {
     # Homebrew can lag behind the patched release: upgrade, and also block the
     # fingerprints in the current keg (Cellar files are writable).
     jf=$(brew_formula_of "$jh/bin/java")
-    if [ -n "$jf" ] && [ "$ps" != PASS ]; then
+    if [ -n "$jf" ] && [ "$ps" != PASS ] && [ "$oracle" -eq 1 ]; then
       add_brew "$jf"
       fix="brew update && brew upgrade $jf (Homebrew may not have ${ps#FAIL:} yet). Also add the 16 SHA-256 fingerprints from impacted-intermediates.json to ${bc:-$jh/lib/security/blocked.certs}. Do not delete roots from cacerts."
     fi
@@ -1730,7 +1813,8 @@ check_java() {
       add_fix "$js" "Block the 16 compromised certificates in $bc (backup kept)" fix_java_blocked_certs "$bc"
     fi
   elif [ "$ps" != PASS ] && [ "$J_STATUS" = PASS ]; then
-    J_DETAIL="$J_DETAIL; version $jv older than ${ps#FAIL:} but this JDK already rejects"
+    if [ "$oracle" -eq 0 ]; then J_DETAIL="$J_DETAIL; OpenJDK patch pending but this JDK already rejects"
+    else J_DETAIL="$J_DETAIL; version $jv older than ${ps#FAIL:} but this JDK already rejects"; fi
   fi
   record "$J_STATUS" "java $jv ($jh)" "$J_DETAIL" "$fix"
 }
@@ -1746,7 +1830,10 @@ step_other_tools() {
   vcheck "deno" "$FIX_DENO" "$(find_bin deno "$HOME/.deno/bin/deno")" "deno upgrade" upgrade
   vcheck "mise" "$FIX_MISE" "$(find_bin mise "$HOME/.local/bin/mise")" "mise self-update   (or: brew upgrade mise)" self-update -y
   vcheck "Claude Code" "$FIX_CLAUDE" "$(find_bin claude "$HOME/.claude/local/claude" "$HOME/.local/bin/claude")" "claude update" update
-  check_start; check_bun
+  vcheck "bun" "$FIX_BUN" "$(find_bin bun "$HOME/.bun/bin/bun")" "bun upgrade   (or: brew upgrade bun)" upgrade
+  vcheck "GitHub CLI" "$FIX_GH" "$(find_bin gh)" "brew upgrade gh   (or install the latest release from cli.github.com)"
+  vcheck "Docker CLI" "$FIX_DOCKER" "$(find_bin docker)" "Update Docker Desktop (Docker menu > Check for Updates), or: brew upgrade docker"
+  check_docker_versions
   check_start; check_go
   check_start; check_perl_mozilla_ca
   step_end
@@ -1806,12 +1893,35 @@ check_homebrew_ca() {
   done
 }
 
-check_bun() {
-  local bunb; bunb=$(find_bin bun "$HOME/.bun/bin/bun")
-  if [ -n "$bunb" ]; then
-    record WARN "bun $("$bunb" --version 2>/dev/null </dev/null)" "no patched release yet (advisory: pending)" "Watch https://github.com/oven-sh/bun/pull/46159 and upgrade when released."
+# check_docker_versions : the Docker Desktop app and, if Docker is running, the
+# Docker Engine (inside Docker Desktop, updating the app updates the engine)
+check_docker_versions() {
+  local app=/Applications/Docker.app v ev
+  check_start
+  if [ ! -d "$app" ]; then
+    record SKIP "Docker Desktop" "not installed"
   else
-    record SKIP "bun" "not installed"
+    v=$(defaults read "$app/Contents/Info" CFBundleShortVersionString 2>/dev/null)
+    if [ -z "$v" ]; then
+      record WARN "Docker Desktop" "could not read version" "Update Docker Desktop (Docker menu > Check for Updates)."
+    elif ver_ge "$v" "$FIX_DOCKER_DESKTOP"; then
+      record PASS "Docker Desktop $v" "patched (>= $FIX_DOCKER_DESKTOP)"
+    else
+      record FAIL "Docker Desktop $v" "older than patched $FIX_DOCKER_DESKTOP" "Update Docker Desktop (Docker menu > Check for Updates)."
+    fi
+  fi
+  check_start
+  if ! have docker; then
+    record SKIP "Docker Engine" "docker not installed"
+    return
+  fi
+  ev=$(run_to 15 docker version --format '{{.Server.Version}}' 2>/dev/null </dev/null)
+  if [ -z "$ev" ]; then
+    record SKIP "Docker Engine" "Docker is not running"
+  elif ver_ge "$ev" "$FIX_DOCKER"; then
+    record PASS "Docker Engine $ev" "patched (>= $FIX_DOCKER)"
+  else
+    record FAIL "Docker Engine $ev" "older than patched $FIX_DOCKER" "Update Docker Desktop (Docker menu > Check for Updates), or the engine on the Docker host."
   fi
 }
 
