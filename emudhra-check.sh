@@ -63,6 +63,11 @@ SCRIPT_VERSION="1.5.0 (2026-10-29)"
 # ===========================================================================
 ADVISORY="https://emudhra.we-have-a-problem.com/"
 SCRIPT_URL="https://raw.githubusercontent.com/infraspecdev/emudhra-check/main/emudhra-check.sh"
+# fix-certpem.sh does the /etc/ssl/cert.pem fix, the part that runs as root. --fix
+# runs the copy next to this script, or (when this script was run with curl)
+# downloads it and runs it only if it has this SHA-256: update the two together.
+CERTPEM_HELPER_URL="https://raw.githubusercontent.com/infraspecdev/emudhra-check/main/fix-certpem.sh"
+CERTPEM_HELPER_SHA256="a225ce9331d64203065e9e294f9bad826aecd9ed55669133705cdce858cf19cc"
 
 # The 12 test hosts. Each serves a leaf signed by one compromised intermediate.
 #   *-emudhra     : intermediate <- emSign Root TLS CA - G3 <- emSign ECC Root CA - G3
@@ -888,48 +893,37 @@ apple_fix() {
 # The fixes
 # ---------------------------------------------------------------------------
 
-# fix_certpem CN : needs sudo. Apple's steps for /etc/ssl/cert.pem
-# (https://support.apple.com/en-us/149555), the file Apple's curl, git, python3,
-# perl, ruby and openssl use: remove the root whose subject ends in /CN=CN
-# ("emSign ECC Root CA - G3", or, optionally, "AAA Certificate Services").
-# Backup: /etc/ssl/cert.pem.orig, always a copy of Apple's untouched file. A file
-# that still has emSign ECC Root CA - G3 is untouched (that root is removed
-# first), so it is backed up again: after a macOS update restored the file, the
-# old backup is out of date (Apple: delete it and repeat the steps).
-# The result is installed with mode 0644, owner root:wheel, then checked with
-# openssl as in Apple's step 4. If openssl cannot read it or still lists the
-# root, the file is put back as it was. Refuses a result with fewer than 50
-# certificates.
-# Undo: sudo cp -p /etc/ssl/cert.pem.orig /etc/ssl/cert.pem
-#       (older versions of this script kept /etc/ssl/cert.pem.pre-emudhra)
+# fix_certpem CN URL SHA256 [HELPER] : needs sudo. Apple's steps for
+# /etc/ssl/cert.pem (https://support.apple.com/en-us/149555), the file Apple's
+# curl, git, python3, perl, ruby and openssl use: removes the root whose subject
+# ends in /CN=CN ("emSign ECC Root CA - G3", or, optionally, "AAA Certificate
+# Services") with fix-certpem.sh, which keeps the backup /etc/ssl/cert.pem.orig
+# and puts the file back if openssl cannot read the result (see that script).
+# HELPER is the fix-certpem.sh next to this script; without it, the helper is
+# downloaded from URL and run only if its SHA-256 is SHA256.
+# Undo: sudo ./fix-certpem.sh --restore
+#       (or: sudo cp -p /etc/ssl/cert.pem.orig /etc/ssl/cert.pem)
 fix_certpem() {
-  local f=/etc/ssl/cert.pem b=/etc/ssl/cert.pem.orig new prev listed
-  if [ ! -f "$b" ] || grep -q '/CN=emSign ECC Root CA - G3$' "$f"; then
-    cp -p "$f" "$b" || return 1
+  local cn=$1 url=$2 want=$3 helper=${4:-} dir got rc
+  if [ -n "$helper" ]; then
+    /bin/bash "$helper" "$cn"
+    return
   fi
-  new=$(mktemp) && prev=$(mktemp) || return 1
-  cp -p "$f" "$prev" || { rm -f "$new" "$prev"; return 1; }
-  # filters the current file, so the two fixes can run one after the other
-  awk -v m="/CN=$1" '/^(###|===) / { skip = 0 }
-       /^=== / && substr($0, length($0) - length(m) + 1) == m { skip = 1 }
-       !skip' "$f" > "$new" || { rm -f "$new" "$prev"; return 1; }
-  if [ "$(grep -c 'BEGIN CERTIFICATE' "$new")" -lt 50 ]; then
-    echo "The result has fewer than 50 certificates: $f not changed."
-    rm -f "$new" "$prev"
+  dir=$(mktemp -d) || return 1
+  if ! curl -fsSL --max-time 60 -o "$dir/fix-certpem.sh" "$url"; then
+    echo "Could not download $url: /etc/ssl/cert.pem not changed."
+    rm -rf "$dir"
     return 1
   fi
-  install -m 0644 -o root -g wheel "$new" "$f" || { rm -f "$new" "$prev"; return 1; }
-  # Apple's step 4: openssl must read the file and no longer list the root
-  if listed=$(openssl crl2pkcs7 -nocrl -certfile "$f" 2>/dev/null | openssl pkcs7 -print_certs -noout 2>/dev/null) \
-     && ! printf '%s\n' "$listed" | grep -qF "$1"; then
-    echo "Removed $1 from $f (backup: $b)"
-    rm -f "$new" "$prev"
-    return 0
+  got=$(shasum -a 256 "$dir/fix-certpem.sh" | awk '{ print $1 }')
+  if [ "$got" != "$want" ]; then
+    echo "fix-certpem.sh from $url does not match this script (SHA-256 $got, expected $want): not run. Download emudhra-check.sh again."
+    rm -rf "$dir"
+    return 1
   fi
-  install -m 0644 -o root -g wheel "$prev" "$f"
-  echo "openssl could not verify $f after removing $1: restored it as it was."
-  rm -f "$new" "$prev"
-  return 1
+  /bin/bash "$dir/fix-certpem.sh" "$cn"; rc=$?
+  rm -rf "$dir"
+  return "$rc"
 }
 
 # fix_keychain_never_trust HOST... : marks the compromised intermediate that
@@ -1476,7 +1470,12 @@ check_keychain() {
 # (the Sectigo cross-signs) is optional, as on the advisory, because unaffected
 # sites still chain to it.
 check_certpem() {
-  local roots st=FAIL
+  local roots st=FAIL h=() run="curl -fsSL $CERTPEM_HELPER_URL -o fix-certpem.sh && sudo bash fix-certpem.sh"
+  # the helper next to this script (a git clone), if there is one
+  if [ -f "${BASH_SOURCE[0]:-}" ] && [ -f "$(dirname "${BASH_SOURCE[0]}")/fix-certpem.sh" ]; then
+    h=("$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fix-certpem.sh")
+    run="sudo ${h[0]}"
+  fi
   if [ ! -f /etc/ssl/cert.pem ]; then record SKIP "/etc/ssl/cert.pem" "file not found"; return; fi
   roots=$(bundle_roots /etc/ssl/cert.pem)
   if [ -z "$roots" ]; then
@@ -1486,25 +1485,23 @@ check_certpem() {
   fi
   case "$roots" in *"emSign ECC Root CA - G3"*)
     add_fix 1 "Remove emSign ECC Root CA - G3 from /etc/ssl/cert.pem (Apple's steps, backup in /etc/ssl/cert.pem.orig)" \
-      fix_certpem "emSign ECC Root CA - G3" ;;
+      fix_certpem "emSign ECC Root CA - G3" "$CERTPEM_HELPER_URL" "$CERTPEM_HELPER_SHA256" ${h[@]+"${h[@]}"} ;;
   esac
   case "$roots" in *"emSign Root TLS CA - G3"*)
     add_fix 1 "Remove emSign Root TLS CA - G3 from /etc/ssl/cert.pem (backup in /etc/ssl/cert.pem.orig)" \
-      fix_certpem "emSign Root TLS CA - G3" ;;
+      fix_certpem "emSign Root TLS CA - G3" "$CERTPEM_HELPER_URL" "$CERTPEM_HELPER_SHA256" ${h[@]+"${h[@]}"} ;;
   esac
   case "$roots" in *"AAA Certificate Services"*)
     add_optional_fix 1 "Remove AAA Certificate Services from /etc/ssl/cert.pem (blocks the Sectigo cross-signed chains; may break some unaffected sites)" \
-      fix_certpem "AAA Certificate Services" ;;
+      fix_certpem "AAA Certificate Services" "$CERTPEM_HELPER_URL" "$CERTPEM_HELPER_SHA256" ${h[@]+"${h[@]}"} ;;
   esac
   # only AAA left: the user chose to keep it (the aaa test chains still FAIL in steps 3-5)
   [ "$roots" = "AAA Certificate Services" ] && st=WARN
   record "$st" "/etc/ssl/cert.pem" "still contains: $roots. Used by Apple's built-in curl, git, python3, perl, ruby, openssl. macOS 27.2 does not fix this file and undoes the workaround; Apple says a future update will fix it." \
-"Apple's steps (https://support.apple.com/en-us/149555; needs admin password; repeat after every macOS update until Apple's fix):
-If a macOS update restored the file, first delete the old backup: sudo rm /etc/ssl/cert.pem.orig
-[ -e /etc/ssl/cert.pem.orig ] || sudo cp -p /etc/ssl/cert.pem /etc/ssl/cert.pem.orig
-t=\$(mktemp) && awk -v s='=== /C=IN/OU=emSign PKI/O=eMudhra Technologies Limited/CN=emSign ECC Root CA - G3' '/^(===|###) /{skip=0} \$0==s{skip=1} !skip' /etc/ssl/cert.pem > \"\$t\" && [ -s \"\$t\" ] && sudo install -m 0644 -o root -g wheel \"\$t\" /etc/ssl/cert.pem; rm -f \"\$t\"
-Optional, also blocks the Sectigo cross-signed chains but may break some unaffected sites: the same with
-s='=== /C=GB/ST=Greater Manchester/L=Salford/O=Comodo CA Limited/CN=AAA Certificate Services'
+"Apple's steps (https://support.apple.com/en-us/149555), done by fix-certpem.sh (needs admin password; repeat after every macOS update until Apple's fix):
+$run
+Optional, also blocks the Sectigo cross-signed chains but may break some unaffected sites: add --with-aaa
+To undo: the same command with --restore
 Check (prints nothing when both roots are gone; if it shows an error, restore the backup):
 openssl crl2pkcs7 -nocrl -certfile /etc/ssl/cert.pem | openssl pkcs7 -print_certs -noout | grep -E 'emSign ECC Root CA - G3|AAA Certificate Services'"
 }
