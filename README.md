@@ -225,6 +225,8 @@ sudo install -m 0755 -o root -g wheel fix-certpem.sh /usr/local/sbin/fix-certpem
 
 With MDM, deploy it as a script that runs as root. Run it again after each macOS update until Apple's own fix is installed: an update can put the roots back.
 
+[`steps.md`](steps.md) has the commands in order: check, fix, after every macOS update, and restore.
+
 ---
 
 ## Speed
