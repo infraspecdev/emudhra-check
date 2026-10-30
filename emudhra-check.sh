@@ -130,7 +130,8 @@ FIX_MISE="2026.10.17"
 FIX_CLAUDE="2.1.303"
 FIX_PERL_MOZCA="20261020"
 FIX_NODE="22.23.4 24.22.1 26.12.1"            # one per release line; newer majors are fine
-FIX_GO="1.26.10 1.27.3"
+FIX_GO="1.26.10 1.27.3"                       # one per release line (1.26.x, 1.27.x)
+GO_PKG_ROOT="/usr/local/go"                    # where the go.dev macOS installer puts Go
 FIX_ELECTRON="42.11.16 43.8.1 44.9.1"
 FIX_JAVA="8.0.511 11.0.33 17.0.21 21.0.13 25.0.5 27.0.1"   # Oracle JDK only; OpenJDK is pending
 FIX_BUN="1.4.4"
@@ -508,6 +509,24 @@ fixed_for_major() {
 # max_major "LIST"
 max_major() { local f m=0; for f in $1; do [ "$(major "$f")" -gt "$m" ] && m=$(major "$f"); done; echo "$m"; }
 
+# go_release_for VERSION "LIST" : the patched Go release VERSION should move to,
+# or nothing when it is patched. Go's release lines are the first two fields
+# (1.26.x, 1.27.x), so the generic major-version rules below do not fit it: a
+# line in LIST must be at least its fix; a line newer than all of LIST is fine;
+# any other line should move to the newest release in LIST.
+go_release_for() {
+  local version=$1 fix newest="" line
+  line=$(echo "$version" | cut -d. -f1-2)
+  for fix in $2; do
+    if [ "$(echo "$fix" | cut -d. -f1-2)" = "$line" ]; then
+      ver_ge "$version" "$fix" || echo "$fix"
+      return 0
+    fi
+    if [ -z "$newest" ] || ver_ge "$fix" "$newest"; then newest=$fix; fi
+  done
+  ver_ge "$version" "$newest" || echo "$newest"
+}
+
 # patched_status VERSION "LIST" : PASS, or FAIL:<needed version>. The same
 # major must be >= its fix; majors newer than the newest fixed line are fine;
 # other lines have no fix at all.
@@ -869,28 +888,48 @@ apple_fix() {
 # The fixes
 # ---------------------------------------------------------------------------
 
-# fix_certpem CN : needs sudo. The advisory's workaround for /etc/ssl/cert.pem
-# (used by Apple's curl, git, python3, perl, ruby, openssl): remove the root
-# whose subject ends in /CN=CN ("emSign ECC Root CA - G3", or, optionally,
-# "AAA Certificate Services"). Keeps the original as
-# /etc/ssl/cert.pem.pre-emudhra (the first time only), and refuses to write a
-# result with fewer than 50 certificates. macOS updates may restore the file
-# (macOS 27.2 did).
-# Undo: sudo cp -p /etc/ssl/cert.pem.pre-emudhra /etc/ssl/cert.pem
+# fix_certpem CN : needs sudo. Apple's steps for /etc/ssl/cert.pem
+# (https://support.apple.com/en-us/149555), the file Apple's curl, git, python3,
+# perl, ruby and openssl use: remove the root whose subject ends in /CN=CN
+# ("emSign ECC Root CA - G3", or, optionally, "AAA Certificate Services").
+# Backup: /etc/ssl/cert.pem.orig, always a copy of Apple's untouched file. A file
+# that still has emSign ECC Root CA - G3 is untouched (that root is removed
+# first), so it is backed up again: after a macOS update restored the file, the
+# old backup is out of date (Apple: delete it and repeat the steps).
+# The result is installed with mode 0644, owner root:wheel, then checked with
+# openssl as in Apple's step 4. If openssl cannot read it or still lists the
+# root, the file is put back as it was. Refuses a result with fewer than 50
+# certificates.
+# Undo: sudo cp -p /etc/ssl/cert.pem.orig /etc/ssl/cert.pem
+#       (older versions of this script kept /etc/ssl/cert.pem.pre-emudhra)
 fix_certpem() {
-  local f=/etc/ssl/cert.pem b=/etc/ssl/cert.pem.pre-emudhra rc=1
-  [ -f "$b" ] || cp -p "$f" "$b" || return 1
+  local f=/etc/ssl/cert.pem b=/etc/ssl/cert.pem.orig new prev listed
+  if [ ! -f "$b" ] || grep -q '/CN=emSign ECC Root CA - G3$' "$f"; then
+    cp -p "$f" "$b" || return 1
+  fi
+  new=$(mktemp) && prev=$(mktemp) || return 1
+  cp -p "$f" "$prev" || { rm -f "$new" "$prev"; return 1; }
   # filters the current file, so the two fixes can run one after the other
   awk -v m="/CN=$1" '/^(###|===) / { skip = 0 }
        /^=== / && substr($0, length($0) - length(m) + 1) == m { skip = 1 }
-       !skip' "$f" > "$f.new" || return 1
-  if [ "$(grep -c 'BEGIN CERTIFICATE' "$f.new")" -ge 50 ]; then
-    cat "$f.new" > "$f"; rc=$?
-  else
+       !skip' "$f" > "$new" || { rm -f "$new" "$prev"; return 1; }
+  if [ "$(grep -c 'BEGIN CERTIFICATE' "$new")" -lt 50 ]; then
     echo "The result has fewer than 50 certificates: $f not changed."
+    rm -f "$new" "$prev"
+    return 1
   fi
-  rm -f "$f.new"
-  return "$rc"
+  install -m 0644 -o root -g wheel "$new" "$f" || { rm -f "$new" "$prev"; return 1; }
+  # Apple's step 4: openssl must read the file and no longer list the root
+  if listed=$(openssl crl2pkcs7 -nocrl -certfile "$f" 2>/dev/null | openssl pkcs7 -print_certs -noout 2>/dev/null) \
+     && ! printf '%s\n' "$listed" | grep -qF "$1"; then
+    echo "Removed $1 from $f (backup: $b)"
+    rm -f "$new" "$prev"
+    return 0
+  fi
+  install -m 0644 -o root -g wheel "$prev" "$f"
+  echo "openssl could not verify $f after removing $1: restored it as it was."
+  rm -f "$new" "$prev"
+  return 1
 }
 
 # fix_keychain_never_trust HOST... : marks the compromised intermediate that
@@ -987,6 +1026,41 @@ fix_java_blocked_certs() {
   for h in "${BAD_SHA256[@]}"; do
     grep -qi "$h" "$f" || echo "$h" >> "$f" || return 1
   done
+}
+
+# fix_go_pkg VERSION : needs sudo. Installs Go VERSION with the official macOS
+# installer from go.dev, which replaces /usr/local/go. The download must match
+# the SHA-256 that go.dev publishes next to it (FILE.sha256) and be signed with
+# Google's Developer ID; otherwise nothing is installed.
+# GO_DL_BASE changes the download location (tests only; sudo does not pass it on).
+# Undo: install the previous version the same way from https://go.dev/dl/
+fix_go_pkg() {
+  local version=$1 arch base pkg dir want got rc
+  arch=$(uname -m); [ "$arch" = x86_64 ] && arch=amd64
+  base=${GO_DL_BASE:-https://dl.google.com/go}
+  pkg="go$version.darwin-$arch.pkg"
+  dir=$(mktemp -d) || return 1
+  if ! curl -fsSL --max-time 600 -o "$dir/$pkg" "$base/$pkg" \
+     || ! want=$(curl -fsSL --max-time 30 "$base/$pkg.sha256"); then
+    echo "Could not download $pkg from $base: not installed."
+    rm -rf "$dir"
+    return 1
+  fi
+  want=$(echo "$want" | awk '{ print $1; exit }')
+  got=$(shasum -a 256 "$dir/$pkg" | awk '{ print $1 }')
+  if [ "$got" != "$want" ]; then
+    echo "SHA-256 mismatch for $pkg (got $got, expected $want): not installed."
+    rm -rf "$dir"
+    return 1
+  fi
+  if ! pkgutil --check-signature "$dir/$pkg" 2>/dev/null | grep -q 'Developer ID Installer: Google LLC'; then
+    echo "$pkg is not signed by Google: not installed."
+    rm -rf "$dir"
+    return 1
+  fi
+  installer -pkg "$dir/$pkg" -target /; rc=$?
+  rm -rf "$dir"
+  return "$rc"
 }
 
 # fix_bundle_remove_roots FILE MARKER_LINE... : needs sudo when FILE is not
@@ -1323,7 +1397,7 @@ step_connectivity() {
 # Step 2: macOS updates, Keychain, /etc/ssl/cert.pem, the macOS trust store
 # ===========================================================================
 step_macos() {
-  step "macOS system trust" "Safari and native apps use the macOS trust store; Apple blocked the intermediates on 22 Oct 2026."
+  step "macOS system trust" "Safari and native apps use the macOS trust store; Apple has blocked the intermediates since 19 Oct 2026 (emSign ECC Root CA - G3 since 23 Oct)."
   check_software_updates
   check_start; check_keychain
   check_start; check_certpem
@@ -1350,7 +1424,7 @@ check_software_updates() {
   elif [ -n "$SWU_IMPORTANT" ]; then
     record FAIL "macOS software updates" "updates available: $SWU_IMPORTANT${others:+ (also: $others)}" \
       "Install them: System Settings > General > Software Update, then restart.
-macOS updates up to 27.2 do not fix Apple's curl/git/python3 and may undo the /etc/ssl/cert.pem fix: run this script again after updating."
+macOS updates up to 27.2 do not fix Apple's curl/git/python3 and may replace /etc/ssl/cert.pem: run this script again after each update until Apple ships its fix (https://support.apple.com/en-us/149555)."
   elif [ -n "$others" ]; then
     record INFO "macOS software updates" "macOS and Safari are up to date; other updates available: $others"
   else
@@ -1411,11 +1485,12 @@ check_certpem() {
     return
   fi
   case "$roots" in *"emSign ECC Root CA - G3"*)
-    add_fix 1 "Remove emSign ECC Root CA - G3 from /etc/ssl/cert.pem (advisory workaround, backup kept)" \
+    add_fix 1 "Remove emSign ECC Root CA - G3 from /etc/ssl/cert.pem (Apple's steps, backup in /etc/ssl/cert.pem.orig)" \
       fix_certpem "emSign ECC Root CA - G3" ;;
   esac
   case "$roots" in *"emSign Root TLS CA - G3"*)
-    add_fix 1 "Remove emSign Root TLS CA - G3 from /etc/ssl/cert.pem (backup kept)" fix_certpem "emSign Root TLS CA - G3" ;;
+    add_fix 1 "Remove emSign Root TLS CA - G3 from /etc/ssl/cert.pem (backup in /etc/ssl/cert.pem.orig)" \
+      fix_certpem "emSign Root TLS CA - G3" ;;
   esac
   case "$roots" in *"AAA Certificate Services"*)
     add_optional_fix 1 "Remove AAA Certificate Services from /etc/ssl/cert.pem (blocks the Sectigo cross-signed chains; may break some unaffected sites)" \
@@ -1423,12 +1498,15 @@ check_certpem() {
   esac
   # only AAA left: the user chose to keep it (the aaa test chains still FAIL in steps 3-5)
   [ "$roots" = "AAA Certificate Services" ] && st=WARN
-  record "$st" "/etc/ssl/cert.pem" "still contains: $roots. Used by Apple's built-in curl, git, python3, perl, ruby, openssl. macOS 27.2 does not fix this file and undoes the workaround." \
-"Advisory workaround (needs admin password; repeat after every macOS update):
+  record "$st" "/etc/ssl/cert.pem" "still contains: $roots. Used by Apple's built-in curl, git, python3, perl, ruby, openssl. macOS 27.2 does not fix this file and undoes the workaround; Apple says a future update will fix it." \
+"Apple's steps (https://support.apple.com/en-us/149555; needs admin password; repeat after every macOS update until Apple's fix):
+If a macOS update restored the file, first delete the old backup: sudo rm /etc/ssl/cert.pem.orig
 [ -e /etc/ssl/cert.pem.orig ] || sudo cp -p /etc/ssl/cert.pem /etc/ssl/cert.pem.orig
 t=\$(mktemp) && awk -v s='=== /C=IN/OU=emSign PKI/O=eMudhra Technologies Limited/CN=emSign ECC Root CA - G3' '/^(===|###) /{skip=0} \$0==s{skip=1} !skip' /etc/ssl/cert.pem > \"\$t\" && [ -s \"\$t\" ] && sudo install -m 0644 -o root -g wheel \"\$t\" /etc/ssl/cert.pem; rm -f \"\$t\"
 Optional, also blocks the Sectigo cross-signed chains but may break some unaffected sites: the same with
-s='=== /C=GB/ST=Greater Manchester/L=Salford/O=Comodo CA Limited/CN=AAA Certificate Services'"
+s='=== /C=GB/ST=Greater Manchester/L=Salford/O=Comodo CA Limited/CN=AAA Certificate Services'
+Check (prints nothing when both roots are gone; if it shows an error, restore the backup):
+openssl crl2pkcs7 -nocrl -certfile /etc/ssl/cert.pem | openssl pkcs7 -print_certs -noout | grep -E 'emSign ECC Root CA - G3|AAA Certificate Services'"
 }
 
 # check_macos_trust_store : live test through Foundation (check_mac.js).
@@ -1477,7 +1555,7 @@ check_browsers() {
   if [ -n "$br" ] && echo "$SWU_IMPORTANT" | grep -qi safari; then
     record WARN "Browsers" "${br# } - a Safari update is waiting" "Install the Safari update (System Settings > General > Software Update), then restart Safari."
   elif [ -n "$br" ]; then
-    record INFO "Browsers" "${br# } (blocked via CRLSets/OneCRL since 17 Oct, Apple since 22 Oct; just keep them updated and restart)"
+    record INFO "Browsers" "${br# } (blocked via CRLSets/OneCRL since 17 Oct, Apple since 19 Oct; just keep them updated and restart)"
   else
     record SKIP "Browsers" "none found in /Applications"
   fi
@@ -1978,14 +2056,15 @@ check_docker_versions() {
   fi
 }
 
-# check_go : the Go version. A Homebrew Go is upgraded by the brew fix; a Go
-# from the go.dev installer (/usr/local/go) has to be reinstalled by hand.
+# check_go : the Go version, compared within its release line. A Homebrew Go
+# is upgraded by the brew fix; a Go from the go.dev installer ($GO_PKG_ROOT) is
+# reinstalled from go.dev by fix_go_pkg; any other Go is updated by hand.
 check_go() {
-  local gob gv ps bf fix; gob=$(find_bin go /usr/local/go/bin/go)
+  local gob gv need bf fix; gob=$(find_bin go "$GO_PKG_ROOT/bin/go")
   if [ -z "$gob" ]; then record SKIP "go" "not installed"; return; fi
   gv=$("$gob" version 2>/dev/null </dev/null | awk '{print $3}' | sed 's/^go//')
-  ps=$(patched_status "$gv" "$FIX_GO")
-  if [ "$ps" = PASS ]; then
+  need=$(go_release_for "$gv" "$FIX_GO")
+  if [ -z "$need" ]; then
     record PASS "go $gv" "patched (>= $FIX_GO)"
     return
   fi
@@ -1993,10 +2072,14 @@ check_go() {
   if [ -n "$bf" ]; then
     add_brew "$bf"
     fix="brew upgrade $bf (--fix does it), then rebuild the binaries/images you ship."
+  elif [ "$(resolve "$gob")" = "$(resolve "$GO_PKG_ROOT/bin/go")" ]; then
+    add_fix 1 "Install Go $need from go.dev (official installer; SHA-256 and Google signature checked)" \
+      fix_go_pkg "$need"
+    fix="--fix installs Go $need from https://go.dev/dl/ (needs admin password), then rebuild the binaries/images you ship."
   else
     fix="Install a patched Go from https://go.dev/dl/, then rebuild the binaries/images you ship."
   fi
-  record WARN "go $gv" "not a patched release (need ${ps#FAIL:}). Go programs on macOS use the system verifier, but binaries you build for Linux/Docker embed the old list." "$fix"
+  record WARN "go $gv" "not a patched release (need $need). Go programs on macOS use the system verifier, but binaries you build for Linux/Docker embed the old list." "$fix"
 }
 
 check_perl_mozilla_ca() {
