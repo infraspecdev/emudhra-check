@@ -169,6 +169,7 @@ curl -fsSL https://raw.githubusercontent.com/infraspecdev/emudhra-check/main/emu
 | python.org Python cannot verify any site | Runs its `Install Certificates.command` | no |
 | Java trusts the test servers | Adds the 16 compromised fingerprints to the JDK's `blocked.certs` / `blacklisted.certs` (for a Homebrew JDK also `brew upgrade`). The original is kept as `*.pre-emudhra`. A Java runtime inside an app (Android Studio, IntelliJ…) is not changed: update the app. | if the JDK is system-wide |
 | uv, pixi, rustup, deno, mise, bun, Claude Code out of date | Their own self-update command | no |
+| Go installed from go.dev (`/usr/local/go`) is not a patched release (1.26.10 for 1.26.x, 1.27.3 for 1.27.x) | Downloads the patched official installer from go.dev, checks it against the SHA-256 go.dev publishes and checks that it is signed by Google, then installs it. Nothing is installed if either check fails. Rebuild the binaries and images you ship afterwards. | yes |
 
 These are **not** fixed automatically. The script tells you what to do:
 
