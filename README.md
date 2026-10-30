@@ -96,7 +96,7 @@ For things that cannot be tested live, the script reads the version or the certi
 | Step | What | How it is checked | If it FAILs |
 |---|---|---|---|
 | 1 | **Connectivity** | Can this Mac reach the 14 test servers? Is a proxy configured? | Only a warning. Live results may be inconclusive on a blocked network. |
-| 2 | **macOS** | Pending macOS updates (`softwareupdate -l`). A live test of the macOS trust store itself (what Safari and native apps use; Apple's curl/git/python3, Homebrew git and pip 24.2+ also fall back to it). Custom Keychain trust for eMudhra/emSign/AAA certificates. Whether `/etc/ssl/cert.pem` still contains the affected roots: Apple's built-in curl, git, python3, perl and ruby use that file, and macOS updates do not fix it (macOS 27.2 did not fix it either, and it undid the workaround on Macs where it had been applied). Browser versions are shown for reference. | Install updates and restart. If macOS itself still trusts the chains (Apple had not blocked the G3B intermediates even in macOS 27.0.1), `--fix` marks them Never Trust in your login keychain; tools that only fail because of macOS are pointed to that fix. Run the advisory's `/etc/ssl/cert.pem` fix, which is printed in full. Reset the Keychain trust. |
+| 2 | **macOS** | Pending macOS updates (`softwareupdate -l`). A live test of the macOS trust store itself (what Safari and native apps use; Apple's curl/git/python3, Homebrew git and pip 24.2+ also fall back to it). Custom Keychain trust for eMudhra/emSign/AAA certificates. Whether `/etc/ssl/cert.pem` still contains the affected roots: Apple's built-in curl, git, python3, perl and ruby use that file, and macOS updates do not fix it (macOS 27.2 did not fix it either, and it undid the workaround on Macs where it had been applied). Browser versions are shown for reference. | Install updates and restart. If macOS itself still trusts the chains (Apple had not blocked the G3B intermediates even in macOS 27.0.1), `--fix` marks them Never Trust in your login keychain; tools that only fail because of macOS are pointed to that fix. Run [Apple's `/etc/ssl/cert.pem` steps](https://support.apple.com/en-us/149555), which are printed in full. Reset the Keychain trust. |
 | 3 | **curl** | Every curl on the Mac (Apple's `/usr/bin/curl`, Homebrew curl, others in your PATH) connects to the 14 test servers. | `/etc/ssl/cert.pem` fix, or `brew upgrade ca-certificates curl` |
 | 4 | **git** | `git ls-remote` over HTTPS against the 14 test servers, for each git. Skipped if git is not installed. | Same as curl. Check `http.sslCAInfo`. |
 | 5 | **Python** | For each Python 3 (Apple, Homebrew, python.org, pyenv, uv, conda, mise, asdf): (a) the default `ssl` context, used by `urllib`; (b) **certifi**, used by `requests`/`httpx`, live test plus a check of its file; (c) **pip**, a real `pip download` attempt. | Upgrade `certifi` to 2026.10.19 or later and `pip` to 26.2.2 or later. For Apple's pip, the advisory's `PIP_CERT` fix is printed. |
@@ -159,7 +159,7 @@ curl -fsSL https://raw.githubusercontent.com/infraspecdev/emudhra-check/main/emu
 
 | Problem found | Automatic fix | Needs password |
 |---|---|---|
-| `/etc/ssl/cert.pem` still has `emSign ECC Root CA - G3` (Apple curl/git/python3) | The advisory's workaround: remove that root. The original is kept as `/etc/ssl/cert.pem.pre-emudhra`. | yes |
+| `/etc/ssl/cert.pem` still has `emSign ECC Root CA - G3` (Apple curl/git/python3) | Runs [`fix-certpem.sh`](#fixing-only-etcsslcertpem-fix-certpemsh) with sudo, which follows [Apple's steps](https://support.apple.com/en-us/149555): back up the file to `/etc/ssl/cert.pem.orig`, remove that root, install the result with mode 0644 and owner root:wheel, and check it with `openssl`. If `openssl` cannot read the result, the file is put back as it was. If a macOS update restored the file, the backup is taken again from the restored file. | yes |
 | `/etc/ssl/cert.pem` still has `AAA Certificate Services` | **Optional, asked separately.** Removes that root too, which also blocks the Sectigo cross-signed intermediates. As the advisory warns, this may break some unaffected sites that still chain to it. If you keep it, Apple's curl/git/python3 still trust the `aaa` test chains. | yes |
 | The macOS trust store still trusts test chains (Safari, Apple curl/git/python3, Homebrew git, pip 24.2+) | Downloads the intermediates the test servers send and marks those whose SHA-256 is on the advisory's list as **Never Trust** in your login keychain. Undo: delete the `EM … CA - G3x` certificates in Keychain Access > login. | your login password (macOS dialog) |
 | Apple's built-in pip trusts the test servers | The advisory's fix: sets `PIP_CERT=/etc/ssl/cert.pem` in the `sitecustomize.py` of Apple's Python. This also covers virtualenvs created from `/usr/bin/python3`. If macOS blocks that change (when that Python is inside Xcode.app), it sets `PIP_CERT` in your own `usercustomize.py` instead, which works for you but not inside virtualenvs. | yes |
@@ -179,9 +179,51 @@ These are **not** fixed automatically. The script tells you what to do:
 - Node installed with nvm/fnm/volta: install the patched version with your version manager;
 - settings that turn off certificate verification: remove them yourself.
 
-To undo the `/etc/ssl/cert.pem` change: `sudo cp -p /etc/ssl/cert.pem.pre-emudhra /etc/ssl/cert.pem`. This brings back both roots; to keep only the emSign fix, run `--fix` again and answer `n` to the optional fix. To undo a Java or custom CA file change, copy the `.pre-emudhra` file back in the same way.
+To undo the `/etc/ssl/cert.pem` change: `sudo ./fix-certpem.sh --restore`, or `sudo cp -p /etc/ssl/cert.pem.orig /etc/ssl/cert.pem` (older versions of this script kept the backup as `/etc/ssl/cert.pem.pre-emudhra`). This brings back both roots; to keep only the emSign fix, run `--fix` again and answer `n` to the optional fix. To undo a Java or custom CA file change, copy the `.pre-emudhra` file back in the same way.
 
 For MDM or scripts, `--fix --yes` applies the fixes without asking. Optional fixes are then skipped; add `--with-optional` to apply them too. It needs to run as the logged-in user. Fixes that need sudo are skipped if sudo is not available.
+
+### Fixing only `/etc/ssl/cert.pem` (`fix-certpem.sh`)
+
+Run `emudhra-check.sh` as your normal user, never with `sudo`: most of its fixes change files in your home folder, and Homebrew refuses to run as root. The `/etc/ssl/cert.pem` fix is the part that needs root, so it lives in its own short script, [`fix-certpem.sh`](fix-certpem.sh), that you can read in full before giving it sudo. `--fix` runs it with sudo: the copy next to `emudhra-check.sh` in a git clone, or, when you ran the check with `curl`, a copy downloaded from this repository that is run only if its SHA-256 matches the one in `emudhra-check.sh`.
+
+You can also run it on its own:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/infraspecdev/emudhra-check/main/fix-certpem.sh -o fix-certpem.sh
+bash fix-certpem.sh --check           # which affected roots are still in the file (no sudo)
+sudo bash fix-certpem.sh              # remove emSign ECC Root CA - G3 (Apple's steps)
+sudo bash fix-certpem.sh --with-aaa   # also remove AAA Certificate Services (may break some unaffected sites)
+sudo bash fix-certpem.sh --restore    # put back /etc/ssl/cert.pem.orig
+```
+
+#### `--with-aaa`: removing AAA Certificate Services
+
+Each of the 6 compromised TLS intermediates has two certificates: one issued by emSign Root TLS CA - G3, which chains to `emSign ECC Root CA - G3`, and one cross-signed by Sectigo, which chains to `AAA Certificate Services`. Removing the emSign root blocks only the first. `--with-aaa` also removes AAA Certificate Services, which blocks the Sectigo cross-signed copies too. It is optional, as in [Apple's article](https://support.apple.com/en-us/149555), because some unaffected sites still chain to that root.
+
+**What it can break.** Only the tools that use `/etc/ssl/cert.pem`: Apple's `/usr/bin/curl`, `git`, `/usr/bin/python3` (and its pip), `perl`, `ruby` and `openssl`. Safari, Chrome, Firefox, Mail and other apps use the macOS trust store and are not affected; neither are Homebrew curl/git, Node.js, Java, python.org Python or anything using `certifi`, which have their own root lists. In those tools, a site breaks when its certificate chain can only be completed through AAA Certificate Services, typically an older Sectigo/Comodo certificate. Most current Sectigo certificates also chain to USERTrust, which stays in the file, so they keep working. Apple's curl, git and python3 fall back to the macOS trust store when `/etc/ssl/cert.pem` fails, so they break less often; `perl`, `ruby` and `openssl` do not fall back.
+
+**Test the hosts you use first** (git servers, APIs, package mirrors). This makes a copy without AAA Certificate Services and checks each host with `openssl`, which has no fallback; nothing on the Mac is changed:
+
+```bash
+awk -v m="/CN=AAA Certificate Services" '/^(###|===) /{skip=0} /^=== / && substr($0,length($0)-length(m)+1)==m{skip=1} !skip' /etc/ssl/cert.pem > /tmp/noaaa.pem
+for h in github.com pypi.org your-git-server.example.com; do
+  echo | openssl s_client -connect "$h:443" -servername "$h" -CAfile /tmp/noaaa.pem 2>/dev/null \
+    | grep -q 'Verify return code: 0' && echo "OK    $h" || echo "BREAK $h"
+done
+```
+
+If every host prints `OK`, `--with-aaa` is safe for you. If something breaks after you applied it, undo it with `sudo bash fix-certpem.sh --restore` (this puts back both roots; run `sudo bash fix-certpem.sh` again to remove only the emSign roots).
+
+As root it only changes `/etc/ssl/cert.pem` and its backup `/etc/ssl/cert.pem.orig`, and only removes `emSign ECC Root CA - G3`, `emSign Root TLS CA - G3` and `AAA Certificate Services`, whatever arguments it is given. That makes it safe to allow on its own, for example with a sudoers rule for a copy that only root can change:
+
+```
+sudo install -m 0755 -o root -g wheel fix-certpem.sh /usr/local/sbin/fix-certpem.sh
+# sudo visudo -f /etc/sudoers.d/fix-certpem, then add:
+%admin ALL=(root) NOPASSWD: /usr/local/sbin/fix-certpem.sh
+```
+
+With MDM, deploy it as a script that runs as root. Run it again after each macOS update until Apple's own fix is installed: an update can put the roots back.
 
 ---
 
@@ -219,7 +261,7 @@ Exit code: `0` = no FAIL, `1` = at least one FAIL. You can use it in scripts or 
 ## FAQ
 
 **I updated macOS. Why does `/usr/bin/curl` still FAIL?**
-Apple's built-in curl, git and python3 check certificates against the file `/etc/ssl/cert.pem`, and that file was not updated. The script prints the advisory's fix, which needs an admin password. macOS 27.2 (26 October) did not fix the file and put the old one back on Macs where the fix had been applied, so run the check again (with `--fix`) after each update until Apple ships a fix.
+Apple's built-in curl, git and python3 check certificates against the file `/etc/ssl/cert.pem`, and that file was not updated. The script prints [Apple's steps](https://support.apple.com/en-us/149555) to fix it, which need an admin password, and `--fix` applies them. Apple says a future software update will fix the file. Until then, an update can replace it (macOS 27.2 did), so run the check again (with `--fix`) after each update.
 
 **Can I just turn off certificate checking?**
 No. That makes things much worse. The advisory explicitly says not to disable verification.
@@ -240,7 +282,7 @@ No. Step 12 only checks Docker images on this Mac, and step 13 only checks the c
 
 ## Development
 
-Edit `emudhra-check.sh` directly. Before pushing, check that `shellcheck emudhra-check.sh` reports nothing and that it runs with the bash 3.2 that macOS ships (`/bin/bash emudhra-check.sh`). Keep the code compatible with bash 3.2: no associative arrays, no `mapfile`, no `${var,,}`.
+Edit `emudhra-check.sh` directly. Before pushing, check that `shellcheck emudhra-check.sh` reports nothing, that it runs with the bash 3.2 that macOS ships (`/bin/bash emudhra-check.sh`), and that the tests pass: `brew install bats-core`, then `bats tests`. The tests never touch system files; they work on temporary copies. Keep the code compatible with bash 3.2: no associative arrays, no `mapfile`, no `${var,,}`.
 
 ---
 
@@ -250,5 +292,7 @@ The test servers, root-certificate markers, the 16 compromised certificate finge
 
 - https://emudhra.we-have-a-problem.com/
 - https://github.com/galadran/we-have-a-problem.com (`chains/`, `roots.json`, `impacted-intermediates.json`)
+
+The `/etc/ssl/cert.pem` fix follows Apple's support article: https://support.apple.com/en-us/149555
 
 If the advisory's "Who has patched?" table changes, update the `FIX_*` values in the "Advisory data" section of `emudhra-check.sh`.
