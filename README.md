@@ -26,6 +26,8 @@ A one-command check that tells you whether your Mac still trusts the compromised
      ```
 
    - **By hand.** Follow the **What to do** list at the end of the output. Each line says what to update and how.
+
+   Every command, step by step: [`steps.md`](steps.md).
 5. A log file is saved on your **Desktop** (`emudhra-check-<computer>-<date>.log`, plus `...-after-fix.log` after `--fix`). Send it to IT if they ask for it.
 
 Some items always need you: installing macOS/Safari updates, updating apps like Slack or VS Code, and rebuilding Docker images. Run the check again afterwards until you get `RESULT: OK`.
@@ -225,7 +227,7 @@ sudo install -m 0755 -o root -g wheel fix-certpem.sh /usr/local/sbin/fix-certpem
 
 With MDM, deploy it as a script that runs as root. Run it again after each macOS update until Apple's own fix is installed: an update can put the roots back.
 
-[`steps.md`](steps.md) has the commands in order: check, fix, after every macOS update, and restore.
+[`steps.md`](steps.md) has the commands for both scripts in order: check, fix, after every macOS update, and undo.
 
 ---
 
