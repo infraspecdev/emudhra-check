@@ -130,7 +130,8 @@ FIX_MISE="2026.10.17"
 FIX_CLAUDE="2.1.303"
 FIX_PERL_MOZCA="20261020"
 FIX_NODE="22.23.4 24.22.1 26.12.1"            # one per release line; newer majors are fine
-FIX_GO="1.26.10 1.27.3"
+FIX_GO="1.26.10 1.27.3"                       # one per release line (1.26.x, 1.27.x)
+GO_PKG_ROOT="/usr/local/go"                    # where the go.dev macOS installer puts Go
 FIX_ELECTRON="42.11.16 43.8.1 44.9.1"
 FIX_JAVA="8.0.511 11.0.33 17.0.21 21.0.13 25.0.5 27.0.1"   # Oracle JDK only; OpenJDK is pending
 FIX_BUN="1.4.4"
@@ -507,6 +508,24 @@ fixed_for_major() {
 }
 # max_major "LIST"
 max_major() { local f m=0; for f in $1; do [ "$(major "$f")" -gt "$m" ] && m=$(major "$f"); done; echo "$m"; }
+
+# go_release_for VERSION "LIST" : the patched Go release VERSION should move to,
+# or nothing when it is patched. Go's release lines are the first two fields
+# (1.26.x, 1.27.x), so the generic major-version rules below do not fit it: a
+# line in LIST must be at least its fix; a line newer than all of LIST is fine;
+# any other line should move to the newest release in LIST.
+go_release_for() {
+  local version=$1 fix newest="" line
+  line=$(echo "$version" | cut -d. -f1-2)
+  for fix in $2; do
+    if [ "$(echo "$fix" | cut -d. -f1-2)" = "$line" ]; then
+      ver_ge "$version" "$fix" || echo "$fix"
+      return 0
+    fi
+    if [ -z "$newest" ] || ver_ge "$fix" "$newest"; then newest=$fix; fi
+  done
+  ver_ge "$version" "$newest" || echo "$newest"
+}
 
 # patched_status VERSION "LIST" : PASS, or FAIL:<needed version>. The same
 # major must be >= its fix; majors newer than the newest fixed line are fine;
@@ -987,6 +1006,41 @@ fix_java_blocked_certs() {
   for h in "${BAD_SHA256[@]}"; do
     grep -qi "$h" "$f" || echo "$h" >> "$f" || return 1
   done
+}
+
+# fix_go_pkg VERSION : needs sudo. Installs Go VERSION with the official macOS
+# installer from go.dev, which replaces /usr/local/go. The download must match
+# the SHA-256 that go.dev publishes next to it (FILE.sha256) and be signed with
+# Google's Developer ID; otherwise nothing is installed.
+# GO_DL_BASE changes the download location (tests only; sudo does not pass it on).
+# Undo: install the previous version the same way from https://go.dev/dl/
+fix_go_pkg() {
+  local version=$1 arch base pkg dir want got rc
+  arch=$(uname -m); [ "$arch" = x86_64 ] && arch=amd64
+  base=${GO_DL_BASE:-https://dl.google.com/go}
+  pkg="go$version.darwin-$arch.pkg"
+  dir=$(mktemp -d) || return 1
+  if ! curl -fsSL --max-time 600 -o "$dir/$pkg" "$base/$pkg" \
+     || ! want=$(curl -fsSL --max-time 30 "$base/$pkg.sha256"); then
+    echo "Could not download $pkg from $base: not installed."
+    rm -rf "$dir"
+    return 1
+  fi
+  want=$(echo "$want" | awk '{ print $1; exit }')
+  got=$(shasum -a 256 "$dir/$pkg" | awk '{ print $1 }')
+  if [ "$got" != "$want" ]; then
+    echo "SHA-256 mismatch for $pkg (got $got, expected $want): not installed."
+    rm -rf "$dir"
+    return 1
+  fi
+  if ! pkgutil --check-signature "$dir/$pkg" 2>/dev/null | grep -q 'Developer ID Installer: Google LLC'; then
+    echo "$pkg is not signed by Google: not installed."
+    rm -rf "$dir"
+    return 1
+  fi
+  installer -pkg "$dir/$pkg" -target /; rc=$?
+  rm -rf "$dir"
+  return "$rc"
 }
 
 # fix_bundle_remove_roots FILE MARKER_LINE... : needs sudo when FILE is not
@@ -1978,14 +2032,15 @@ check_docker_versions() {
   fi
 }
 
-# check_go : the Go version. A Homebrew Go is upgraded by the brew fix; a Go
-# from the go.dev installer (/usr/local/go) has to be reinstalled by hand.
+# check_go : the Go version, compared within its release line. A Homebrew Go
+# is upgraded by the brew fix; a Go from the go.dev installer ($GO_PKG_ROOT) is
+# reinstalled from go.dev by fix_go_pkg; any other Go is updated by hand.
 check_go() {
-  local gob gv ps bf fix; gob=$(find_bin go /usr/local/go/bin/go)
+  local gob gv need bf fix; gob=$(find_bin go "$GO_PKG_ROOT/bin/go")
   if [ -z "$gob" ]; then record SKIP "go" "not installed"; return; fi
   gv=$("$gob" version 2>/dev/null </dev/null | awk '{print $3}' | sed 's/^go//')
-  ps=$(patched_status "$gv" "$FIX_GO")
-  if [ "$ps" = PASS ]; then
+  need=$(go_release_for "$gv" "$FIX_GO")
+  if [ -z "$need" ]; then
     record PASS "go $gv" "patched (>= $FIX_GO)"
     return
   fi
@@ -1993,10 +2048,14 @@ check_go() {
   if [ -n "$bf" ]; then
     add_brew "$bf"
     fix="brew upgrade $bf (--fix does it), then rebuild the binaries/images you ship."
+  elif [ "$(resolve "$gob")" = "$(resolve "$GO_PKG_ROOT/bin/go")" ]; then
+    add_fix 1 "Install Go $need from go.dev (official installer; SHA-256 and Google signature checked)" \
+      fix_go_pkg "$need"
+    fix="--fix installs Go $need from https://go.dev/dl/ (needs admin password), then rebuild the binaries/images you ship."
   else
     fix="Install a patched Go from https://go.dev/dl/, then rebuild the binaries/images you ship."
   fi
-  record WARN "go $gv" "not a patched release (need ${ps#FAIL:}). Go programs on macOS use the system verifier, but binaries you build for Linux/Docker embed the old list." "$fix"
+  record WARN "go $gv" "not a patched release (need $need). Go programs on macOS use the system verifier, but binaries you build for Linux/Docker embed the old list." "$fix"
 }
 
 check_perl_mozilla_ca() {
