@@ -191,11 +191,29 @@ You can also run it on its own:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/infraspecdev/emudhra-check/main/fix-certpem.sh -o fix-certpem.sh
-./fix-certpem.sh --check              # which affected roots are still in the file (no sudo)
+bash fix-certpem.sh --check           # which affected roots are still in the file (no sudo)
 sudo bash fix-certpem.sh              # remove emSign ECC Root CA - G3 (Apple's steps)
 sudo bash fix-certpem.sh --with-aaa   # also remove AAA Certificate Services (may break some unaffected sites)
 sudo bash fix-certpem.sh --restore    # put back /etc/ssl/cert.pem.orig
 ```
+
+#### `--with-aaa`: removing AAA Certificate Services
+
+Each of the 6 compromised TLS intermediates has two certificates: one issued by emSign Root TLS CA - G3, which chains to `emSign ECC Root CA - G3`, and one cross-signed by Sectigo, which chains to `AAA Certificate Services`. Removing the emSign root blocks only the first. `--with-aaa` also removes AAA Certificate Services, which blocks the Sectigo cross-signed copies too. It is optional, as in [Apple's article](https://support.apple.com/en-us/149555), because some unaffected sites still chain to that root.
+
+**What it can break.** Only the tools that use `/etc/ssl/cert.pem`: Apple's `/usr/bin/curl`, `git`, `/usr/bin/python3` (and its pip), `perl`, `ruby` and `openssl`. Safari, Chrome, Firefox, Mail and other apps use the macOS trust store and are not affected; neither are Homebrew curl/git, Node.js, Java, python.org Python or anything using `certifi`, which have their own root lists. In those tools, a site breaks when its certificate chain can only be completed through AAA Certificate Services, typically an older Sectigo/Comodo certificate. Most current Sectigo certificates also chain to USERTrust, which stays in the file, so they keep working. Apple's curl, git and python3 fall back to the macOS trust store when `/etc/ssl/cert.pem` fails, so they break less often; `perl`, `ruby` and `openssl` do not fall back.
+
+**Test the hosts you use first** (git servers, APIs, package mirrors). This makes a copy without AAA Certificate Services and checks each host with `openssl`, which has no fallback; nothing on the Mac is changed:
+
+```bash
+awk -v m="/CN=AAA Certificate Services" '/^(###|===) /{skip=0} /^=== / && substr($0,length($0)-length(m)+1)==m{skip=1} !skip' /etc/ssl/cert.pem > /tmp/noaaa.pem
+for h in github.com pypi.org your-git-server.example.com; do
+  echo | openssl s_client -connect "$h:443" -servername "$h" -CAfile /tmp/noaaa.pem 2>/dev/null \
+    | grep -q 'Verify return code: 0' && echo "OK    $h" || echo "BREAK $h"
+done
+```
+
+If every host prints `OK`, `--with-aaa` is safe for you. If something breaks after you applied it, undo it with `sudo bash fix-certpem.sh --restore` (this puts back both roots; run `sudo bash fix-certpem.sh` again to remove only the emSign roots).
 
 As root it only changes `/etc/ssl/cert.pem` and its backup `/etc/ssl/cert.pem.orig`, and only removes `emSign ECC Root CA - G3`, `emSign Root TLS CA - G3` and `AAA Certificate Services`, whatever arguments it is given. That makes it safe to allow on its own, for example with a sudoers rule for a copy that only root can change:
 
