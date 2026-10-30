@@ -869,28 +869,48 @@ apple_fix() {
 # The fixes
 # ---------------------------------------------------------------------------
 
-# fix_certpem CN : needs sudo. The advisory's workaround for /etc/ssl/cert.pem
-# (used by Apple's curl, git, python3, perl, ruby, openssl): remove the root
-# whose subject ends in /CN=CN ("emSign ECC Root CA - G3", or, optionally,
-# "AAA Certificate Services"). Keeps the original as
-# /etc/ssl/cert.pem.pre-emudhra (the first time only), and refuses to write a
-# result with fewer than 50 certificates. macOS updates may restore the file
-# (macOS 27.2 did).
-# Undo: sudo cp -p /etc/ssl/cert.pem.pre-emudhra /etc/ssl/cert.pem
+# fix_certpem CN : needs sudo. Apple's steps for /etc/ssl/cert.pem
+# (https://support.apple.com/en-us/149555), the file Apple's curl, git, python3,
+# perl, ruby and openssl use: remove the root whose subject ends in /CN=CN
+# ("emSign ECC Root CA - G3", or, optionally, "AAA Certificate Services").
+# Backup: /etc/ssl/cert.pem.orig, always a copy of Apple's untouched file. A file
+# that still has emSign ECC Root CA - G3 is untouched (that root is removed
+# first), so it is backed up again: after a macOS update restored the file, the
+# old backup is out of date (Apple: delete it and repeat the steps).
+# The result is installed with mode 0644, owner root:wheel, then checked with
+# openssl as in Apple's step 4. If openssl cannot read it or still lists the
+# root, the file is put back as it was. Refuses a result with fewer than 50
+# certificates.
+# Undo: sudo cp -p /etc/ssl/cert.pem.orig /etc/ssl/cert.pem
+#       (older versions of this script kept /etc/ssl/cert.pem.pre-emudhra)
 fix_certpem() {
-  local f=/etc/ssl/cert.pem b=/etc/ssl/cert.pem.pre-emudhra rc=1
-  [ -f "$b" ] || cp -p "$f" "$b" || return 1
+  local f=/etc/ssl/cert.pem b=/etc/ssl/cert.pem.orig new prev listed
+  if [ ! -f "$b" ] || grep -q '/CN=emSign ECC Root CA - G3$' "$f"; then
+    cp -p "$f" "$b" || return 1
+  fi
+  new=$(mktemp) && prev=$(mktemp) || return 1
+  cp -p "$f" "$prev" || { rm -f "$new" "$prev"; return 1; }
   # filters the current file, so the two fixes can run one after the other
   awk -v m="/CN=$1" '/^(###|===) / { skip = 0 }
        /^=== / && substr($0, length($0) - length(m) + 1) == m { skip = 1 }
-       !skip' "$f" > "$f.new" || return 1
-  if [ "$(grep -c 'BEGIN CERTIFICATE' "$f.new")" -ge 50 ]; then
-    cat "$f.new" > "$f"; rc=$?
-  else
+       !skip' "$f" > "$new" || { rm -f "$new" "$prev"; return 1; }
+  if [ "$(grep -c 'BEGIN CERTIFICATE' "$new")" -lt 50 ]; then
     echo "The result has fewer than 50 certificates: $f not changed."
+    rm -f "$new" "$prev"
+    return 1
   fi
-  rm -f "$f.new"
-  return "$rc"
+  install -m 0644 -o root -g wheel "$new" "$f" || { rm -f "$new" "$prev"; return 1; }
+  # Apple's step 4: openssl must read the file and no longer list the root
+  if listed=$(openssl crl2pkcs7 -nocrl -certfile "$f" 2>/dev/null | openssl pkcs7 -print_certs -noout 2>/dev/null) \
+     && ! printf '%s\n' "$listed" | grep -qF "$1"; then
+    echo "Removed $1 from $f (backup: $b)"
+    rm -f "$new" "$prev"
+    return 0
+  fi
+  install -m 0644 -o root -g wheel "$prev" "$f"
+  echo "openssl could not verify $f after removing $1: restored it as it was."
+  rm -f "$new" "$prev"
+  return 1
 }
 
 # fix_keychain_never_trust HOST... : marks the compromised intermediate that
@@ -1323,7 +1343,7 @@ step_connectivity() {
 # Step 2: macOS updates, Keychain, /etc/ssl/cert.pem, the macOS trust store
 # ===========================================================================
 step_macos() {
-  step "macOS system trust" "Safari and native apps use the macOS trust store; Apple blocked the intermediates on 22 Oct 2026."
+  step "macOS system trust" "Safari and native apps use the macOS trust store; Apple has blocked the intermediates since 19 Oct 2026 (emSign ECC Root CA - G3 since 23 Oct)."
   check_software_updates
   check_start; check_keychain
   check_start; check_certpem
@@ -1350,7 +1370,7 @@ check_software_updates() {
   elif [ -n "$SWU_IMPORTANT" ]; then
     record FAIL "macOS software updates" "updates available: $SWU_IMPORTANT${others:+ (also: $others)}" \
       "Install them: System Settings > General > Software Update, then restart.
-macOS updates up to 27.2 do not fix Apple's curl/git/python3 and may undo the /etc/ssl/cert.pem fix: run this script again after updating."
+macOS updates up to 27.2 do not fix Apple's curl/git/python3 and may replace /etc/ssl/cert.pem: run this script again after each update until Apple ships its fix (https://support.apple.com/en-us/149555)."
   elif [ -n "$others" ]; then
     record INFO "macOS software updates" "macOS and Safari are up to date; other updates available: $others"
   else
@@ -1411,11 +1431,12 @@ check_certpem() {
     return
   fi
   case "$roots" in *"emSign ECC Root CA - G3"*)
-    add_fix 1 "Remove emSign ECC Root CA - G3 from /etc/ssl/cert.pem (advisory workaround, backup kept)" \
+    add_fix 1 "Remove emSign ECC Root CA - G3 from /etc/ssl/cert.pem (Apple's steps, backup in /etc/ssl/cert.pem.orig)" \
       fix_certpem "emSign ECC Root CA - G3" ;;
   esac
   case "$roots" in *"emSign Root TLS CA - G3"*)
-    add_fix 1 "Remove emSign Root TLS CA - G3 from /etc/ssl/cert.pem (backup kept)" fix_certpem "emSign Root TLS CA - G3" ;;
+    add_fix 1 "Remove emSign Root TLS CA - G3 from /etc/ssl/cert.pem (backup in /etc/ssl/cert.pem.orig)" \
+      fix_certpem "emSign Root TLS CA - G3" ;;
   esac
   case "$roots" in *"AAA Certificate Services"*)
     add_optional_fix 1 "Remove AAA Certificate Services from /etc/ssl/cert.pem (blocks the Sectigo cross-signed chains; may break some unaffected sites)" \
@@ -1423,12 +1444,15 @@ check_certpem() {
   esac
   # only AAA left: the user chose to keep it (the aaa test chains still FAIL in steps 3-5)
   [ "$roots" = "AAA Certificate Services" ] && st=WARN
-  record "$st" "/etc/ssl/cert.pem" "still contains: $roots. Used by Apple's built-in curl, git, python3, perl, ruby, openssl. macOS 27.2 does not fix this file and undoes the workaround." \
-"Advisory workaround (needs admin password; repeat after every macOS update):
+  record "$st" "/etc/ssl/cert.pem" "still contains: $roots. Used by Apple's built-in curl, git, python3, perl, ruby, openssl. macOS 27.2 does not fix this file and undoes the workaround; Apple says a future update will fix it." \
+"Apple's steps (https://support.apple.com/en-us/149555; needs admin password; repeat after every macOS update until Apple's fix):
+If a macOS update restored the file, first delete the old backup: sudo rm /etc/ssl/cert.pem.orig
 [ -e /etc/ssl/cert.pem.orig ] || sudo cp -p /etc/ssl/cert.pem /etc/ssl/cert.pem.orig
 t=\$(mktemp) && awk -v s='=== /C=IN/OU=emSign PKI/O=eMudhra Technologies Limited/CN=emSign ECC Root CA - G3' '/^(===|###) /{skip=0} \$0==s{skip=1} !skip' /etc/ssl/cert.pem > \"\$t\" && [ -s \"\$t\" ] && sudo install -m 0644 -o root -g wheel \"\$t\" /etc/ssl/cert.pem; rm -f \"\$t\"
 Optional, also blocks the Sectigo cross-signed chains but may break some unaffected sites: the same with
-s='=== /C=GB/ST=Greater Manchester/L=Salford/O=Comodo CA Limited/CN=AAA Certificate Services'"
+s='=== /C=GB/ST=Greater Manchester/L=Salford/O=Comodo CA Limited/CN=AAA Certificate Services'
+Check (prints nothing when both roots are gone; if it shows an error, restore the backup):
+openssl crl2pkcs7 -nocrl -certfile /etc/ssl/cert.pem | openssl pkcs7 -print_certs -noout | grep -E 'emSign ECC Root CA - G3|AAA Certificate Services'"
 }
 
 # check_macos_trust_store : live test through Foundation (check_mac.js).
@@ -1477,7 +1501,7 @@ check_browsers() {
   if [ -n "$br" ] && echo "$SWU_IMPORTANT" | grep -qi safari; then
     record WARN "Browsers" "${br# } - a Safari update is waiting" "Install the Safari update (System Settings > General > Software Update), then restart Safari."
   elif [ -n "$br" ]; then
-    record INFO "Browsers" "${br# } (blocked via CRLSets/OneCRL since 17 Oct, Apple since 22 Oct; just keep them updated and restart)"
+    record INFO "Browsers" "${br# } (blocked via CRLSets/OneCRL since 17 Oct, Apple since 19 Oct; just keep them updated and restart)"
   else
     record SKIP "Browsers" "none found in /Applications"
   fi
