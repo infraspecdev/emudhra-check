@@ -171,7 +171,7 @@ Options
   --deep            Also scan node_modules folders during the file scan.
   --domain a,b      Also check that the certificates served by these domains
                     do not use an affected intermediate (for service owners).
-  --log FILE        Write the log to FILE (default: ~/Desktop/emudhra-check-logs).
+  --log FILE        Write the log to FILE (default: ~/emudhra-logs).
   --no-color        Plain output.
   -h, --help        Show this help.
 
@@ -303,9 +303,8 @@ init_output() {
   RULE_W=$TERM_W; [ "$RULE_W" -gt 92 ] && RULE_W=92
 
   if [ -z "$OPT_LOG" ]; then
-    d="$HOME/Desktop"; [ -d "$d" ] && [ -w "$d" ] || d="$HOME"
-    # all logs in one folder (falls back to the Desktop/home if it cannot be made)
-    mkdir -p "$d/emudhra-check-logs" 2>/dev/null && d="$d/emudhra-check-logs"
+    # all logs in one folder in the home folder (falls back to the home folder itself)
+    d="$HOME"; mkdir -p "$d/emudhra-logs" 2>/dev/null && d="$d/emudhra-logs"
     OPT_LOG="$d/emudhra-check-$(hostname -s 2>/dev/null || echo mac)-$(date +%Y%m%d-%H%M%S).log"
   fi
   LOG="$OPT_LOG"
