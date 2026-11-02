@@ -215,7 +215,7 @@ done
 
 If every host prints `OK`, `--with-aaa` is safe for you. If something breaks after you applied it, undo it with `sudo bash fix-certpem.sh --restore` (this puts back both roots; run `sudo bash fix-certpem.sh` again to remove only the emSign roots).
 
-As root it only changes `/etc/ssl/cert.pem` and its backup `/etc/ssl/cert.pem.orig`, and only removes `emSign ECC Root CA - G3`, `emSign Root TLS CA - G3` and `AAA Certificate Services`, whatever arguments it is given. That makes it safe to allow on its own, for example with a sudoers rule for a copy that only root can change:
+As root it only changes `/etc/ssl/cert.pem` and its backup `/etc/ssl/cert.pem.orig`, and only removes `emSign ECC Root CA - G3`, `emSign Root TLS CA - G3` and `AAA Certificate Services`, whatever arguments it is given, and it only runs the system tools in `/usr/bin`, `/bin`, `/usr/sbin` and `/sbin` (it ignores the caller's `PATH`). That makes it safe to allow on its own, for example with a sudoers rule for a copy that only root can change (installed in a root-owned folder, as below; never a path inside your home folder or a git clone):
 
 ```
 sudo install -m 0755 -o root -g wheel fix-certpem.sh /usr/local/sbin/fix-certpem.sh

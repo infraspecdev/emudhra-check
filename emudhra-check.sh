@@ -67,7 +67,7 @@ SCRIPT_URL="https://raw.githubusercontent.com/infraspecdev/emudhra-check/main/em
 # runs the copy next to this script, or (when this script was run with curl)
 # downloads it and runs it only if it has this SHA-256: update the two together.
 CERTPEM_HELPER_URL="https://raw.githubusercontent.com/infraspecdev/emudhra-check/main/fix-certpem.sh"
-CERTPEM_HELPER_SHA256="a225ce9331d64203065e9e294f9bad826aecd9ed55669133705cdce858cf19cc"
+CERTPEM_HELPER_SHA256="c23a02f206b82b67c7be1be78c83d726082ad4dc1cf507f7cde0f3761a7ba7a5"
 
 # The 12 test hosts. Each serves a leaf signed by one compromised intermediate.
 #   *-emudhra     : intermediate <- emSign Root TLS CA - G3 <- emSign ECC Root CA - G3
@@ -906,6 +906,12 @@ apple_fix() {
 fix_certpem() {
   local cn=$1 url=$2 want=$3 helper=${4:-} dir got rc
   if [ -n "$helper" ]; then
+    # the local copy runs as root too: check it like a downloaded one
+    got=$(shasum -a 256 "$helper" | awk '{ print $1 }')
+    if [ "$got" != "$want" ]; then
+      echo "$helper does not match this script (SHA-256 $got, expected $want): not run. Run git pull, or delete it to use the downloaded copy."
+      return 1
+    fi
     /bin/bash "$helper" "$cn"
     return
   fi
@@ -1014,8 +1020,31 @@ fix_pyorg_certificates() {
 # JDK 16), which makes that JDK refuse those certificates. Roots in cacerts are
 # not touched. Keeps the original as FILE.pre-emudhra.
 # Undo: cp -p FILE.pre-emudhra FILE
+# fix_safe_target FILE : not a fix itself; used by the fixes that write FILE and
+# FILE.pre-emudhra. Refuses symlinks, and as root refuses a FILE in any folder
+# not owned by root: the user could swap the path for a link to a system file
+# between the check and the write (cp follows dangling links on macOS).
+fix_safe_target() {
+  local f="$1" d
+  if [ -L "$f" ] || [ -L "$f.pre-emudhra" ]; then
+    echo "$f or $f.pre-emudhra is a symbolic link: not changed."
+    return 1
+  fi
+  [ "$(id -u)" = 0 ] || return 0
+  d=$(dirname "$f")
+  while :; do
+    if [ "$(/usr/bin/stat -f %u "$d" 2>/dev/null)" != 0 ]; then
+      echo "$f is in $d, which is not owned by root: not changed as root. Fix it as the folder's owner (make the file writable, then run --fix again)."
+      return 1
+    fi
+    [ "$d" = / ] && break
+    d=$(dirname "$d")
+  done
+}
+
 fix_java_blocked_certs() {
   local f="$1" h
+  fix_safe_target "$f" || return 1
   [ -f "$f.pre-emudhra" ] || cp -p "$f" "$f.pre-emudhra" || return 1
   for h in "${BAD_SHA256[@]}"; do
     grep -qi "$h" "$f" || echo "$h" >> "$f" || return 1
@@ -1066,6 +1095,7 @@ fix_go_pkg() {
 # Undo: cp -p FILE.pre-emudhra FILE
 fix_bundle_remove_roots() {
   local f="$1" t n0 n1 rc=1; shift
+  fix_safe_target "$f" || return 1
   [ -f "$f.pre-emudhra" ] || cp -p "$f" "$f.pre-emudhra" || return 1
   t=$(mktemp) || return 1
   awk -v m="$*" '
@@ -1217,7 +1247,10 @@ fx_run() {
   defs=$(declare -p BAD_SHA256
          for fn in $(declare -F | awk '$3 ~ /^fix_/ { print $3 }'); do declare -f "$fn"; done)
   if [ "${FX_SUDO[$1]}" = 1 ] && [ "$(id -u)" != 0 ]; then
-    sudo /bin/bash -c "$defs; \"\$@\"" emudhra-fix "${FX_WORDS[@]}"
+    # clean environment: root must not pick up tools from the user's PATH
+    # (/opt/homebrew/bin belongs to the user)
+    sudo /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/var/root \
+      /bin/bash -c "$defs; \"\$@\"" emudhra-fix "${FX_WORDS[@]}"
   else
     /bin/bash -c "$defs; \"\$@\"" emudhra-fix "${FX_WORDS[@]}"
   fi > "$2" 2>&1 </dev/null
