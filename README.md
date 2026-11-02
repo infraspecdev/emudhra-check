@@ -26,7 +26,7 @@ A one-command check that tells you whether your Mac still trusts the compromised
      ```
 
    - **By hand.** Follow the **What to do** list at the end of the output. Each line says what to update and how.
-5. A log file is saved on your **Desktop** (`emudhra-check-<computer>-<date>.log`, plus `...-after-fix.log` after `--fix`). Send it to IT if they ask for it.
+5. A log file is saved in the **`emudhra-check-logs`** folder on your Desktop (`emudhra-check-<computer>-<date>.log`, plus `...-after-fix.log` after `--fix`). Send it to IT if they ask for it.
 
 Some items always need you: installing macOS/Safari updates, updating apps like Slack or VS Code, and rebuilding Docker images. Run the check again afterwards until you get `RESULT: OK`.
 
@@ -39,7 +39,7 @@ Yes. By default (check mode, a dry-run) the script is **read-only**.
 - It does **not** change, install or delete anything. It does not ask for your password or need `sudo`.
 - It does **not** need git, Xcode, Homebrew or Python. It only uses tools that ship with macOS, and it skips anything you do not have.
 - It does **not** send your data anywhere. The only network traffic is TLS connections to the advisory's 14 test servers and to `github.com` / `pypi.org`, which are used to confirm that normal sites still work.
-- The only files it writes are the log on your Desktop and a temporary folder with its small test programs, which is deleted when it ends.
+- The only files it writes are the log in `~/Desktop/emudhra-check-logs` and a temporary folder with its small test programs, which is deleted when it ends.
 - One exception, only if Docker is running: to read the CA file inside each local image, it creates a stopped container from the image (it never starts it) and removes it right away. Use `--no-docker` to skip this.
 
 In check mode, fixes are only **suggested**. They are applied only when you run with `--fix` **and** answer `y`. See [Auto-fix mode](#auto-fix-mode---fix).
@@ -250,7 +250,7 @@ curl -fsSL https://raw.githubusercontent.com/infraspecdev/emudhra-check/main/emu
 | `--no-docker` | Skip step 12, Docker. |
 | `--deep` | Include `node_modules` folders in the disk scan (slower). |
 | `--domain a.com,b.com` | Also check the certificates served by your domains (step 13). |
-| `--log FILE` | Save the log to `FILE` instead of the Desktop. |
+| `--log FILE` | Save the log to `FILE` instead of `~/Desktop/emudhra-check-logs`. |
 | `--no-color` | Plain output, without colors or icons. |
 | `--help` | Show the help text. |
 
