@@ -41,6 +41,10 @@
 # --check: 0 when no emSign root is left, 1 otherwise.
 
 set -u
+# Only the system tools, never ones from the caller's PATH (it may run as root
+# from a sudoers rule, and sudo keeps the caller's PATH on macOS).
+PATH=/usr/bin:/bin:/usr/sbin:/sbin
+export PATH
 
 ECC="emSign ECC Root CA - G3"
 TLS="emSign Root TLS CA - G3"
